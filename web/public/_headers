@@ -1,0 +1,8 @@
+# Response headers for Cloudflare Pages — what the <meta> Content-Security-Policy
+# injected at build time (vite.config.ts) cannot carry.
+/*
+  Content-Security-Policy: frame-ancestors 'none'
+  X-Frame-Options: DENY
+  Permissions-Policy: bluetooth=(self), serial=(self), camera=(), microphone=(), geolocation=(), usb=(), payment=()
+  X-Content-Type-Options: nosniff
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
