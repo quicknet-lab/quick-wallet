@@ -1169,11 +1169,7 @@ function renderAssets(tonBalance: bigint) {
         amount: formatUnits(jetton.balance, jetton.decimals),
         // A flagged token's pool price can be anything, and a disputed scale
         // makes the amount itself unreliable — neither gets a dollar figure.
-        // USD₮ is a dollar; a price line under it would say nothing.
-        usd:
-          jetton.master.toString({ bounceable: true }) === USDT_ASSET
-            ? undefined
-            : usdPrice(jetton.isScam || jetton.decimalsDisputed ? null : jetton.master.toString({ bounceable: true })),
+        usd: usdPrice(jetton.isScam || jetton.decimalsDisputed ? null : jetton.master.toString({ bounceable: true })),
       }),
     );
   }
@@ -1187,7 +1183,7 @@ function renderAssets(tonBalance: bigint) {
         name: t.name,
         badge: t.verified ? { text: 'verified', kind: 'ok' } : { text: 'unverified', kind: 'warn' },
         amount: '0',
-        usd: t.master === Address.parse(USDT_ASSET).toRawString() ? undefined : usdPrice(null),
+        usd: usdPrice(t.master === Address.parse(USDT_ASSET).toRawString() ? USDT_ASSET : null),
       }),
     );
   }

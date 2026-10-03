@@ -25,7 +25,7 @@ const UPSTREAM: Record<string, string> = {
 // Only what wallet.ts calls: this is not a general-purpose relay for the key.
 const ALLOWED: Array<{ method: string; path: RegExp }> = [
   { method: 'POST', path: /^api\/v2\/jsonRPC$/ },
-  { method: 'GET', path: /^api\/v3\/(jetton\/wallets|jetton\/masters|nft\/items)$/ },
+  { method: 'GET', path: /^api\/v3\/(jetton\/wallets|jetton\/masters|nft\/items|actions)$/ },
 ];
 
 export const onRequest = async (context: {
