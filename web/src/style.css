@@ -1659,6 +1659,14 @@ button.asset:hover,
 
 /* ---------- history ---------- */
 
+#history-refresh-btn {
+  margin-bottom: 12px;
+}
+
+#history-more-btn {
+  margin-top: 12px;
+}
+
 a.history-row {
   color: inherit;
   text-decoration: none;

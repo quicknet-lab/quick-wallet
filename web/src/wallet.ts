@@ -32,6 +32,7 @@ import {
   parseJettonMasterLookup,
   parseNftItems,
   parseUnits,
+  shortAmount,
   type JettonHolding,
   type NftItem,
 } from './tokens';
@@ -408,7 +409,7 @@ export class TonWallet {
       { bounceable: destination.bounceable, testOnly: destination.testOnly },
       onStatus,
       {
-        amount: `${fromNano(amountNano)} GRAM`,
+        amount: `${shortAmount(fromNano(amountNano))} GRAM`,
         address: destination.address.toString({ bounceable: destination.bounceable, testOnly: destination.testOnly }),
       },
       confirmFee,
@@ -466,7 +467,7 @@ export class TonWallet {
 
     if (amount > holding.balance) {
       throw new Error(
-        `Not enough ${holding.symbol} — this wallet holds ${formatUnits(holding.balance, holding.decimals)}.`,
+        `Not enough ${holding.symbol} — this wallet holds ${shortAmount(formatUnits(holding.balance, holding.decimals))}.`,
       );
     }
     const [own, jettonWallet] = await Promise.all([this.getOwnState(), this.resolveJettonWallet(holding.master)]);
@@ -502,7 +503,7 @@ export class TonWallet {
       },
       onStatus,
       {
-        amount: `${formatUnits(amount, holding.decimals)} ${holding.symbol}`,
+        amount: `${shortAmount(formatUnits(amount, holding.decimals))} ${holding.symbol}`,
         address: destination.address.toString({ bounceable: destination.bounceable, testOnly: destination.testOnly }),
       },
       confirmFee,

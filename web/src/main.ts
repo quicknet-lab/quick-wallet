@@ -21,6 +21,7 @@ import {
   findKnownMainnetJetton,
   formatUnits,
   parseUnits,
+  shortAmount,
   type JettonHolding,
   type NftItem,
 } from './tokens';
@@ -322,10 +323,10 @@ app.innerHTML = `
 
       <div id="view-history" hidden>
         <h1 class="view-title">History</h1>
+        <button type="button" id="history-refresh-btn" class="btn btn-ghost btn-block">Refresh</button>
         <div id="history-list" class="list"></div>
         <div id="history-empty" class="empty" hidden>No transactions yet.</div>
         <button type="button" id="history-more-btn" class="btn btn-ghost btn-block" hidden>Show more</button>
-        <button type="button" id="history-refresh-btn" class="btn btn-ghost btn-block">Refresh</button>
         <p class="footnote">Read from toncenter's index, which sees which address is
         being asked about. Tokens the index flags as scams are left out.</p>
       </div>
@@ -769,7 +770,7 @@ type SwapQuoteContext = {
 
 /** Formats a quote leg for display, in whole units. */
 function formatSwapAmount(units: string | bigint, decimals: number, symbol: string): string {
-  return `${formatUnits(BigInt(units), decimals)} ${symbol}`;
+  return `${shortAmount(formatUnits(BigInt(units), decimals))} ${symbol}`;
 }
 /** Last TON balance read, so the ASSETS table can be re-rendered without
  * spending another RPC call just to redraw the first row. */
@@ -1105,7 +1106,7 @@ function assetRow(opts: {
 
   const amount = document.createElement('span');
   amount.className = 'asset-amount';
-  amount.textContent = opts.amount;
+  amount.textContent = shortAmount(opts.amount);
 
   if (opts.usd === undefined) {
     row.append(icon, text, amount);
@@ -1131,7 +1132,7 @@ function usdPrice(asset: string | null): string | undefined {
   if (!pricesLoaded) return `$${formatUsdt(0)}`;
   const price = asset === null ? undefined : usdPrices.get(asset);
   if (price === undefined) return '—';
-  return price >= 1 ? `$${formatUsdt(price)}` : `$${parseFloat(price.toPrecision(4))}`;
+  return price >= 1 ? `$${formatUsdt(price)}` : `$${shortAmount(price.toFixed(8))}`;
 }
 
 function visibleJettons(): JettonHolding[] {
@@ -1236,7 +1237,7 @@ function onAssetChange() {
   if (jetton) {
     sendHintEl.hidden = false;
     sendHintEl.textContent =
-      `Available: ${formatUnits(jetton.balance, jetton.decimals)} ${jetton.symbol}. ` +
+      `Available: ${shortAmount(formatUnits(jetton.balance, jetton.decimals))} ${jetton.symbol}. ` +
       'Sending a token also spends about 0.05 GRAM of gas; whatever is left over comes back.';
   } else {
     sendHintEl.hidden = true;
@@ -1450,9 +1451,9 @@ function renderLegBalance(el: HTMLElement, option: TokenOption | undefined) {
   if (!option) return;
   el.innerHTML = ic('wallet');
   const amount = document.createElement('span');
-  amount.textContent = option.amount || '0';
+  amount.textContent = shortAmount(option.amount || '0');
   el.append(amount);
-  el.title = `Balance: ${option.amount || '0'} ${option.symbol}`;
+  el.title = `Balance: ${amount.textContent} ${option.symbol}`;
 }
 
 function renderSwapLegs() {
@@ -1736,9 +1737,9 @@ function swapMinUnits(ctx: SwapQuoteContext): string {
 function renderSwapQuote(ctx: SwapQuoteContext) {
   const quote = ctx.quote as QuoteOfSwap;
   const sw = quote.settlementData.value;
-  swapToAmountEl.textContent = formatUnits(BigInt(quote.outputUnits), ctx.toDecimals);
+  swapToAmountEl.textContent = shortAmount(formatUnits(BigInt(quote.outputUnits), ctx.toDecimals));
   const price = Number(formatUnits(BigInt(quote.outputUnits), ctx.toDecimals)) / Number(formatUnits(BigInt(quote.inputUnits), ctx.fromDecimals));
-  swapRateEl.textContent = Number.isFinite(price) ? `1 ${ctx.fromSymbol} ≈ ${parseFloat(price.toPrecision(6))} ${ctx.toSymbol}` : '—';
+  swapRateEl.textContent = Number.isFinite(price) ? `1 ${ctx.fromSymbol} ≈ ${shortAmount(price.toFixed(10))} ${ctx.toSymbol}` : '—';
   swapMinEl.textContent = formatSwapAmount(swapMinUnits(ctx), ctx.toDecimals, ctx.toSymbol);
   swapImpactEl.textContent = sw.priceImpactPips !== undefined ? `${(sw.priceImpactPips / 10_000).toFixed(2)}%` : '—';
   swapSlippageShownEl.textContent = ctx.autoSlippage
@@ -2086,7 +2087,7 @@ function historyRow(item: HistoryItem): HTMLElement {
   for (const leg of item.legs) {
     const line = document.createElement('span');
     line.className = leg.incoming ? 'history-in' : 'history-out';
-    line.textContent = `${leg.incoming ? '+' : '−'}${leg.amount} ${leg.symbol}`;
+    line.textContent = `${leg.incoming ? '+' : '−'}${shortAmount(leg.amount)} ${leg.symbol}`;
     amounts.appendChild(line);
   }
 
@@ -2597,7 +2598,7 @@ const confirmFee: ConfirmFee = (feeNano, info) =>
     fields: [
       ['to', info.address],
       ['amount', info.amount],
-      ['network fee (est.)', `~${fromNano(feeNano)} GRAM`],
+      ['network fee (est.)', `~${shortAmount(fromNano(feeNano))} GRAM`],
     ],
     confirmLabel: 'Confirm',
   });
@@ -2988,27 +2989,27 @@ async function handleAppRequest(app: ConnectedApp, request: AppRequest<RpcMethod
       fields.push([
         `send${n}`,
         held
-          ? `${formatUnits(transfer.amount, held.decimals)} ${held.symbol}${held.verified ? '' : ' (unverified token)'}`
+          ? `${shortAmount(formatUnits(transfer.amount, held.decimals))} ${held.symbol}${held.verified ? '' : ' (unverified token)'}`
           : `${transfer.amount} units of a token this wallet doesn't hold`,
       ]);
       fields.push([`to${n}`, recipient(transfer.recipient)]);
       if (held && transfer.amount >= held.balance) {
         fields.push([`warning${n}`, `this is your whole ${held.symbol} balance`]);
       }
-      fields.push([`gas${n}`, `${fromNano(m.value)} GRAM`]);
+      fields.push([`gas${n}`, `${shortAmount(fromNano(m.value))} GRAM`]);
     } else if (transfer?.kind === 'nft') {
       const item = nfts.find((nft) => nft.address.equals(m.to));
       fields.push([`send${n}`, item ? `NFT "${item.name}"` : `NFT ${m.to.toString({ testOnly: m.testOnly })}`]);
       fields.push([`to${n}`, recipient(transfer.recipient)]);
-      fields.push([`gas${n}`, `${fromNano(m.value)} GRAM`]);
+      fields.push([`gas${n}`, `${shortAmount(fromNano(m.value))} GRAM`]);
     } else {
       fields.push([`to${n}`, m.to.toString({ bounceable: m.bounce, testOnly: m.testOnly })]);
-      fields.push([`amount${n}`, `${fromNano(m.value)} GRAM`]);
+      fields.push([`amount${n}`, `${shortAmount(fromNano(m.value))} GRAM`]);
       if (m.body) fields.push([`data${n}`, 'contract call — the device shows what it can read of it']);
     }
     if (m.init) fields.push([`deploy${n}`, 'creates a new contract']);
   });
-  fields.push(['total', `${fromNano(tx.total)} GRAM + network fees`]);
+  fields.push(['total', `${shortAmount(fromNano(tx.total))} GRAM + network fees`]);
   showStatus(`${name} asks to send a transaction.`);
   if (!(await tcPrompt('REQUEST', fields, 'Sign on device'))) {
     await respond(errorResponse(request.id, new TonConnectError(ERROR.USER_REJECTS, 'The user declined.')));

@@ -10,6 +10,7 @@ import {
   parseJettonMasterLookup,
   parseNftItems,
   parseUnits,
+  shortAmount,
 } from './tokens';
 
 const USDT_MASTER = 'EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs';
@@ -51,6 +52,21 @@ describe('formatUnits', () => {
     expect(formatUnits(0n, 6)).toBe('0');
     expect(formatUnits(1_000_000n, 6)).toBe('1');
     expect(formatUnits(42n, 0)).toBe('42');
+  });
+});
+
+describe('shortAmount', () => {
+  it('keeps at most four decimals, cut rather than rounded', () => {
+    expect(shortAmount('12.34567')).toBe('12.3456');
+    expect(shortAmount('0.99999')).toBe('0.9999');
+    expect(shortAmount('1.50000')).toBe('1.5');
+    expect(shortAmount('2.00001')).toBe('2');
+    expect(shortAmount('42')).toBe('42');
+    expect(shortAmount('0')).toBe('0');
+  });
+
+  it('does not show a non-zero amount as zero', () => {
+    expect(shortAmount('0.000000001')).toBe('<0.0001');
   });
 });
 

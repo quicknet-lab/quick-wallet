@@ -52,6 +52,19 @@ export function formatUnits(value: bigint, decimals: number): string {
   return frac === '' ? whole : `${whole}.${frac}`;
 }
 
+/**
+ * A decimal amount as the user sees it: at most four digits after the point,
+ * cut rather than rounded so a balance is never overstated. A non-zero amount
+ * too small for that reads "<0.0001" instead of a misleading 0.
+ */
+export function shortAmount(amount: string): string {
+  const m = /^(\d+)(?:\.(\d*))?$/.exec(amount);
+  if (!m) return amount;
+  const frac = (m[2] ?? '').slice(0, 4).replace(/0+$/, '');
+  if (frac === '' && /^0+$/.test(m[1]) && /[1-9]/.test(m[2] ?? '')) return '<0.0001';
+  return frac === '' ? m[1] : `${m[1]}.${frac}`;
+}
+
 // --------------------------------------------------------------- registry
 
 /**
