@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build # tsc type check + vite build
+
+  firmware-host-tests:
+    # The transaction parser and ton_proof, built with the host compiler
+    # under ASan/UBSan against ESP-IDF's own mbedtls (see run_tests.sh).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: espressif/esp-idf
+          ref: v5.3.6
+          path: esp-idf
+      - run: git -C esp-idf submodule update --init --depth 1 components/mbedtls/mbedtls
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: ./firmware/test/run_tests.sh
+        env:
+          IDF_PATH: ${{ github.workspace }}/esp-idf
+
+  firmware-build:
+    # Both configurations: the development build and the secure release
+    # build (built unsigned here — release images are signed offline).
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.3.6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Development build
+        shell: bash
+        working-directory: firmware
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py -B build.esp32s3 set-target esp32s3
+          idf.py -B build.esp32s3 build
+      - name: Secure build
+        shell: bash
+        working-directory: firmware
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py -B build.esp32s3-secure -D QUICK_WALLET_SECURE=1 set-target esp32s3
+          idf.py -B build.esp32s3-secure -D QUICK_WALLET_SECURE=1 build
+      - name: BLE-only image
+        shell: bash
+        working-directory: firmware
+        run: |
+          . $IDF_PATH/export.sh
+          for elf in build.esp32s3/quick_wallet.elf build.esp32s3-secure/quick_wallet.elf; do
+            for sym in esp_wifi_init esp_now_init esp_bluedroid_init tud_init tusb_init; do
+              if xtensa-esp32s3-elf-nm "$elf" | grep -qw "$sym"; then
+                echo "$sym is linked into $elf" >&2
+                exit 1
+              fi
+            done
+          done

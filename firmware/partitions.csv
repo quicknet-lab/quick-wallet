@@ -1,0 +1,12 @@
+# Name,   Type, SubType,  Offset,  Size,    Flags
+nvs,      data, nvs,      0xf000,  0x6000,
+phy_init, data, phy,      0x15000, 0x1000,
+# 'encrypted' is what the IDF docs ask for on an NVS key partition. The
+# subtype is in fact encrypted either way (both the bootloader and
+# esp_partition special-case nvs_keys), but the whole point of this
+# partition is that it must never be readable once flash encryption is
+# on, and that must not rest on a special case in someone else's code.
+nvs_key,  data, nvs_keys, 0x16000, 0x1000,  encrypted
+otadata,  data, ota,      0x17000, 0x2000,
+ota_0,    app,  ota_0,    0x20000, 0x180000,
+ota_1,    app,  ota_1,    0x1A0000,0x180000,
