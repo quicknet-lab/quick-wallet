@@ -72,7 +72,7 @@ Third-party code and fonts:
 
 - `firmware/components/ed25519` — orlp/ed25519, zlib
   (`firmware/components/ed25519/LICENSE`);
-- the screen font — X11 misc-fixed 8x13, public domain, provenance in
-  `firmware/main/display_font.h`;
+- the screen font — Terminus Font by Dimitar Toshkov Zhekov, SIL Open Font
+  License 1.1, license text and provenance in `firmware/main/display_font.h`;
 - JetBrains Mono in the web app — SIL Open Font License 1.1
   (`@fontsource/jetbrains-mono`).

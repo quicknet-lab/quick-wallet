@@ -124,7 +124,10 @@ static struct {
  * one for a comment that doesn't fit the spare row of its message's page. A press on any page but the last moves on;
  * only a press on the last one signs, so nothing can be signed unseen. */
 #define TX_MAX_PAGES (3 * TON_TX_MAX_MESSAGES + 1)
-#define TX_INLINE_COMMENT_MAX (DISPLAY_COLS - 5) /* after "Msg: " */
+/* Left edge of the labels and extra lines on a message page, lined up
+ * with the address under them. */
+#define TX_MARGIN_X 16
+#define TX_INLINE_COMMENT_MAX ((DISPLAY_W - TX_MARGIN_X) / 8 - 5) /* FONT_S, after "Msg: " */
 enum tx_page_kind {
     TX_PAGE_MAIN = 0,
     /* What is true of the whole request rather than of one message: when it
@@ -198,10 +201,10 @@ static void layout_tx_pages(void)
  * someone needs to copy 24 words down by hand varies. SEED_IDLE_TIMEOUT_US
  * is only a safety net against leaving the phrase lit up on an abandoned
  * device indefinitely, not the normal way to dismiss it. */
-/* Two columns of "24. abcdefgh" (the longest word has 8 letters) make a
- * 26-character line, centered on the row. The 12 rows under the header take
- * the whole phrase, so it is one page. */
-#define SEED_WORDS_PER_PAGE 24
+/* Two columns of "24 abcdefgh" (the longest word has 8 letters) in FONT_M
+ * fill the width; the 6 rows under the header take 12 words, so the phrase
+ * is two pages. */
+#define SEED_WORDS_PER_PAGE 12
 #define SEED_ROWS_PER_PAGE (SEED_WORDS_PER_PAGE / 2)
 #define SEED_TOTAL_PAGES (TON_MNEMONIC_WORD_COUNT / SEED_WORDS_PER_PAGE)
 #define SEED_IDLE_TIMEOUT_US (5 * 60 * 1000 * 1000LL)
@@ -945,27 +948,24 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
  * update from another task can't land halfway through it. */
 static void draw_seed_page(int page)
 {
-    char header[48];
     /* Room for what gcc thinks the numbers could print. */
     char line[48];
 
     display_lock();
     display_clear();
-    if (SEED_TOTAL_PAGES == 1) {
-        snprintf(header, sizeof(header), "Seed: %d words", TON_MNEMONIC_WORD_COUNT);
-    } else {
-        snprintf(header, sizeof(header), "Seed %d-%d/%d (%d/%d)", page * SEED_WORDS_PER_PAGE + 1,
-                 (page + 1) * SEED_WORDS_PER_PAGE, TON_MNEMONIC_WORD_COUNT, page + 1, SEED_TOTAL_PAGES);
-    }
-    display_draw_text_centered(0, header);
+    snprintf(line, sizeof(line), "Seed: words %d-%d of %d", page * SEED_WORDS_PER_PAGE + 1,
+             (page + 1) * SEED_WORDS_PER_PAGE, TON_MNEMONIC_WORD_COUNT);
+    display_header(line, COLOR_ORANGE);
     /* Numbered down the left column, then down the right one — the order
      * the words are written out on paper. */
     for (int row = 0; row < SEED_ROWS_PER_PAGE; row++) {
-        int left = page * SEED_WORDS_PER_PAGE + row;
-        int right = left + SEED_ROWS_PER_PAGE;
-        snprintf(line, sizeof(line), "%2d. %-8s  %2d. %-8s", left + 1, ton_mnemonic_word(seed_words[left]),
-                 right + 1, ton_mnemonic_word(seed_words[right]));
-        display_draw_text_centered(1 + row, line);
+        for (int col = 0; col < 2; col++) {
+            int n = page * SEED_WORDS_PER_PAGE + col * SEED_ROWS_PER_PAGE + row;
+            int y = DISPLAY_HEADER_H + 4 + row * FONT_M->h;
+            snprintf(line, sizeof(line), "%2d ", n + 1);
+            int x = display_text(10 + col * (DISPLAY_W / 2 - 4), y, FONT_M, COLOR_GRAY, line);
+            display_text(x, y, FONT_M, COLOR_WHITE, ton_mnemonic_word(seed_words[n]));
+        }
     }
     display_flush();
     display_unlock();
@@ -974,22 +974,23 @@ static void draw_seed_page(int page)
 /* Caller holds s_lock, like draw_seed_page(). */
 static void draw_seed_check(void)
 {
-    /* Room for what gcc thinks the numbers could print; display_draw_text
-     * clips at DISPLAY_COLS on its own. */
+    /* Room for what gcc thinks the numbers could print. */
     char line[48];
 
     display_lock();
     display_clear();
     snprintf(line, sizeof(line), "Check %d/%d: word #%d", seed_check_question + 1, SEED_CHECK_QUESTIONS,
              seed_check_positions[seed_check_question] + 1);
-    display_draw_text_centered(0, line);
+    display_header(line, COLOR_ACCENT);
     for (int i = 0; i < SEED_CHECK_OPTIONS; i++) {
-        snprintf(line, sizeof(line), "%s %-8s", i == seed_check_selected ? ">" : " ",
-                 ton_mnemonic_word(seed_check_options[i]));
-        display_draw_text_centered(2 + i, line);
+        int y = DISPLAY_HEADER_H + 4 + i * 26;
+        if (i == seed_check_selected) {
+            display_fill(80, y - 1, DISPLAY_W - 160, 26, COLOR_ACCENT);
+        }
+        display_text_centered(y, FONT_M, i == seed_check_selected ? COLOR_BLACK : COLOR_WHITE,
+                              ton_mnemonic_word(seed_check_options[i]));
     }
-    display_draw_text_centered(DISPLAY_ROWS - 2, "Press: next word");
-    display_draw_text_centered(DISPLAY_ROWS - 1, "Hold 1s: choose");
+    display_footer("Press: next   Hold 1s: choose", false, false);
     display_flush();
     display_unlock();
 }
@@ -1094,25 +1095,123 @@ static enum wallet_status seed_press_locked(bool long_press)
     return WALLET_STATUS_SEED_CHECKING;
 }
 
-/* Caller holds s_lock. Written out in full, 24 characters to a row:
- * checking only the two ends of an address is exactly what vanity addresses
- * are generated to get past. */
-static void draw_address(uint8_t first_row, const ton_tx_addr_t *addr, bool bounceable, bool test_only)
+/* Caller holds s_lock. Written out in full, 24 characters to a row in
+ * FONT_M: checking only the two ends of an address is exactly what vanity
+ * addresses are generated to get past. The ends are still in red — the
+ * first 6 characters and the last 4 — as the place to start comparing. */
+#define ADDR_ROW_CHARS 24
+#define ADDR_HEAD_RED  6
+#define ADDR_TAIL_RED  4
+static void draw_address(int y, const ton_tx_addr_t *addr, bool bounceable, bool test_only)
 {
     char text[TON_TX_ADDR_STR_LEN + 1];
     ton_tx_format_address(addr, bounceable, test_only, text);
-    for (int i = 0; i < 2; i++) {
-        char line[25];
-        memcpy(line, text + 24 * i, 24);
-        line[24] = '\0';
-        display_draw_text_centered(first_row + i, line);
+    char run[ADDR_ROW_CHARS + 1];
+    const int x0 = (DISPLAY_W - ADDR_ROW_CHARS * FONT_M->w) / 2;
+    /* Drawn as runs of one color: red head, white middle, red tail. */
+    for (int i = 0; i < TON_TX_ADDR_STR_LEN;) {
+        const bool red = i < ADDR_HEAD_RED || i >= TON_TX_ADDR_STR_LEN - ADDR_TAIL_RED;
+        const int row_end = (i / ADDR_ROW_CHARS + 1) * ADDR_ROW_CHARS;
+        int j = i + 1;
+        while (j < row_end && (j < ADDR_HEAD_RED || j >= TON_TX_ADDR_STR_LEN - ADDR_TAIL_RED) == red) {
+            j++;
+        }
+        snprintf(run, sizeof(run), "%.*s", j - i, text + i);
+        display_text(x0 + (i % ADDR_ROW_CHARS) * FONT_M->w, y + (i / ADDR_ROW_CHARS) * FONT_M->h, FONT_M,
+                     red ? COLOR_RED : COLOR_WHITE, run);
+        i = j;
     }
+}
+
+/* Greedy word wrap of text into lines of at most cols characters: breaks
+ * after a space, inside a word only when the word alone is longer than a
+ * line. Nothing is dropped but the one space a line is broken at. Fills in
+ * each line's start and length and returns how many there are, or
+ * max_lines + 1 if it needs more than max_lines. */
+static int wrap_text(const char *text, size_t cols, int max_lines, size_t starts[], size_t lens[])
+{
+    const size_t len = strlen(text);
+    size_t pos = 0;
+    int n = 0;
+    while (pos < len) {
+        if (n == max_lines) {
+            return max_lines + 1;
+        }
+        size_t take = len - pos;
+        if (take > cols) {
+            size_t brk = cols;
+            while (brk > 0 && text[pos + brk] != ' ') {
+                brk--;
+            }
+            take = brk > 0 ? brk : cols;
+        }
+        starts[n] = pos;
+        lens[n] = take;
+        n++;
+        pos += take;
+        if (pos < len && text[pos] == ' ') {
+            pos++;
+        }
+    }
+    return n;
+}
+
+/* Writes text in full between the header and the footer: word-wrapped in
+ * font if it fits in max_lines, otherwise in the smaller fallback font.
+ * Each line is centered, or starts at x = 4 when left is set. */
+static void draw_wrapped(const char *text, int y, const display_font_t *font, int max_lines,
+                         const display_font_t *fallback, int fallback_lines, bool left)
+{
+    size_t starts[8], lens[8];
+    char line[48];
+    int n = wrap_text(text, DISPLAY_COLS(font), max_lines, starts, lens);
+    if (n > max_lines) {
+        /* Callers size fallback_lines so this always fits: in greedy wrap
+         * any two neighbouring lines hold at least a line's worth of text. */
+        font = fallback;
+        n = wrap_text(text, DISPLAY_COLS(font), fallback_lines, starts, lens);
+    }
+    for (int i = 0; i < n && i < fallback_lines; i++) {
+        snprintf(line, sizeof(line), "%.*s", (int)lens[i], text + starts[i]);
+        if (left) {
+            display_text(4, y + i * font->h, font, COLOR_WHITE, line);
+        } else {
+            display_text_centered(y + i * font->h, font, COLOR_WHITE, line);
+        }
+    }
+}
+
+/* The amount of a message, centered: the figure in FONT_L and the unit
+ * after it in FONT_M, both shrinking to FONT_M — and then to FONT_S — when
+ * that is what it takes to show every digit. */
+static void draw_amount(int y, const uint8_t value[TON_TX_AMOUNT_BYTES], unsigned decimals, const char *unit,
+                        uint16_t unit_color)
+{
+    char amount[48];
+    char suffix[24];
+    snprintf(suffix, sizeof(suffix), " %s", unit);
+    const int unit_w = display_text_width(FONT_M, suffix);
+    ton_tx_format_amount(value, decimals, (size_t)((DISPLAY_W - unit_w) / FONT_M->w), amount, sizeof(amount));
+    if (amount[0] == '~' || amount[0] == '(') {
+        /* Cut or too long in FONT_M: the whole line in FONT_S instead. */
+        ton_tx_format_amount(value, decimals, (size_t)(DISPLAY_COLS(FONT_S) - strlen(suffix)), amount,
+                             sizeof(amount));
+        const int w = display_text_width(FONT_S, amount) + display_text_width(FONT_S, suffix);
+        int x = display_text((DISPLAY_W - w) / 2, y + 8, FONT_S, COLOR_WHITE, amount);
+        display_text(x, y + 8, FONT_S, unit_color, suffix);
+        return;
+    }
+    const display_font_t *font = (display_text_width(FONT_L, amount) + unit_w <= DISPLAY_W) ? FONT_L : FONT_M;
+    int x = display_text((DISPLAY_W - display_text_width(font, amount) - unit_w) / 2, y, font, COLOR_WHITE, amount);
+    /* The unit sits on the figure's baseline: row 26 of a FONT_L glyph, row
+     * 19 of a FONT_M one. */
+    display_text(x, y + (font == FONT_L ? 26 - 19 : 0), FONT_M, unit_color, suffix);
 }
 
 /* Paints the current page of the signing request (see s_tx_pages). Every
  * figure and address on it is read from the message being signed; the host
- * only chooses the token label (shown with a '?') and which friendly form
- * addresses are written in. Caller holds s_lock. */
+ * only chooses the token label (shown with a '?', in orange) and which
+ * friendly form addresses are written in. Caller holds s_lock. */
 static void draw_tx_page(void)
 {
     static const char *const titles[] = {
@@ -1124,10 +1223,9 @@ static void draw_tx_page(void)
     const uint8_t msg_index = s_tx_pages[s_tx_page].msg;
     const ton_tx_msg_t *m = &s_tx.msgs[msg_index];
     const bool last = s_tx_page + 1 >= s_tx_page_count;
-    /* Sized for the longest thing written into them (a whole comment), not
-     * for the screen: display_draw_text clips at DISPLAY_COLS on its own. */
+    const bool testnet_hint = (s_tx_hint.flags & GATT_TX_HINT_TEST_ONLY) != 0;
     char counter[24] = "";
-    char line[TON_TX_COMMENT_MAX + 48];
+    char line[64];
     char amount[48];
 
     if (s_tx.n_msgs > 1) {
@@ -1144,17 +1242,17 @@ static void draw_tx_page(void)
          * convenience. */
         time_t deadline = (time_t)s_tx.valid_until;
         struct tm utc;
-        display_draw_text_centered(0, "Signing request");
-        display_draw_text_centered(3, "Expires (UTC):");
+        display_header("Signing request", COLOR_ACCENT);
+        display_text_centered(36, FONT_S, COLOR_GRAY, "Expires (UTC)");
         if (gmtime_r(&deadline, &utc) != NULL) {
             snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d", utc.tm_year + 1900, utc.tm_mon + 1,
                      utc.tm_mday, utc.tm_hour, utc.tm_min);
         } else {
             snprintf(line, sizeof(line), "%" PRIu32, s_tx.valid_until);
         }
-        display_draw_text_centered(4, line);
+        display_text_centered(56, FONT_M, COLOR_WHITE, line);
         snprintf(line, sizeof(line), "%u message%s", (unsigned)s_tx.n_msgs, s_tx.n_msgs == 1 ? "" : "s");
-        display_draw_text_centered(6, line);
+        display_text_centered(98, FONT_M, COLOR_WHITE, line);
     } else if (s_tx_pages[s_tx_page].kind == TX_PAGE_SOURCE) {
         const bool nft = m->kind == TON_TX_MSG_NFT;
         const ton_jetton_t *known = s_tx_jettons[msg_index];
@@ -1163,41 +1261,34 @@ static void draw_tx_page(void)
         } else {
             snprintf(line, sizeof(line), "%s%s", nft ? "NFT item" : "Token wallet", counter);
         }
-        display_draw_text_centered(0, line);
-        display_draw_text_centered(3, nft ? "being sent:" : "sending from:");
+        display_header(line, COLOR_ACCENT);
+        display_text_centered(40, FONT_S, COLOR_GRAY, nft ? "being sent:" : "sending from:");
         /* Always a contract, so written the way explorers and wallets write
          * contracts (EQ…) for the ends to compare — not in the form the
          * recipient was typed in, which is what the hint's flag is about. */
-        draw_address(4, &m->dest, true, (s_tx_hint.flags & GATT_TX_HINT_TEST_ONLY) != 0);
+        draw_address(64, &m->dest, true, testnet_hint);
     } else if (s_tx_pages[s_tx_page].kind == TX_PAGE_COMMENT) {
         snprintf(line, sizeof(line), "Comment%s", counter);
-        display_draw_text_centered(0, line);
-        size_t comment_len = strlen(m->comment);
-        for (uint8_t row = 1; row <= DISPLAY_ROWS - 2; row++) {
-            size_t off = (size_t)(row - 1) * DISPLAY_COLS;
-            if (off >= comment_len) {
-                break;
-            }
-            snprintf(line, sizeof(line), "%.*s", (int)DISPLAY_COLS, m->comment + off);
-            display_draw_text(row, 0, line);
-        }
+        display_header(line, COLOR_ACCENT);
+        /* 5 lines of FONT_M take any comment of ordinary words; one that
+         * wraps badly still fits whole in 8 lines of FONT_S. */
+        draw_wrapped(m->comment, DISPLAY_HEADER_H + 8, FONT_M, 5, FONT_S, 8, true);
     } else {
-        snprintf(line, sizeof(line), "%s%s%s", titles[m->kind], m->deploys ? "+deploy" : "", counter);
-        display_draw_text_centered(0, line);
+        snprintf(line, sizeof(line), "%s%s%s", titles[m->kind], m->deploys ? " +deploy" : "", counter);
+        display_header(line, m->kind == TON_TX_MSG_CALL ? COLOR_RED : m->deploys ? COLOR_ORANGE : COLOR_ACCENT);
 
+        const char *to = "to:";
         switch (m->kind) {
         case TON_TX_MSG_JETTON:
             if (s_tx_jettons[msg_index] != NULL) {
                 /* Named and scaled by the device itself: no '?'. */
-                ton_tx_format_amount(m->token_amount, s_tx_jettons[msg_index]->decimals, DISPLAY_COLS, amount,
-                                     sizeof(amount));
-                snprintf(line, sizeof(line), "%s to:", s_tx_jettons[msg_index]->symbol);
+                draw_amount(26, m->token_amount, s_tx_jettons[msg_index]->decimals, s_tx_jettons[msg_index]->symbol,
+                            COLOR_GRAY);
             } else if (s_tx_hint.has_token) {
-                ton_tx_format_amount(m->token_amount, s_tx_hint.decimals, DISPLAY_COLS, amount, sizeof(amount));
-                snprintf(line, sizeof(line), "%s? to:", s_tx_hint.symbol[0] != '\0' ? s_tx_hint.symbol : "token");
+                snprintf(line, sizeof(line), "%s?", s_tx_hint.symbol[0] != '\0' ? s_tx_hint.symbol : "token");
+                draw_amount(26, m->token_amount, s_tx_hint.decimals, line, COLOR_ORANGE);
             } else {
-                ton_tx_format_amount(m->token_amount, 0, DISPLAY_COLS, amount, sizeof(amount));
-                snprintf(line, sizeof(line), "token units to:");
+                draw_amount(26, m->token_amount, 0, "token units", COLOR_GRAY);
             }
             break;
         case TON_TX_MSG_NFT:
@@ -1205,35 +1296,35 @@ static void draw_tx_page(void)
              * this one; abbreviating it here again would only invite
              * comparing the two ends of an address, which is exactly what a
              * generated look-alike gets past. */
-            snprintf(amount, sizeof(amount), "item: prev page");
-            snprintf(line, sizeof(line), "new owner:");
+            display_text_centered(30, FONT_M, COLOR_GRAY, "item: prev page");
+            to = "new owner:";
             break;
         default:
-            ton_tx_format_amount(m->ton, 9, DISPLAY_COLS, amount, sizeof(amount));
-            snprintf(line, sizeof(line), "GRAM to:");
+            draw_amount(26, m->ton, 9, "GRAM", COLOR_GRAY);
             break;
         }
-        display_draw_text_centered(2, amount);
-        display_draw_text_centered(3, line);
-        draw_address(4, (m->kind == TON_TX_MSG_JETTON || m->kind == TON_TX_MSG_NFT) ? &m->to : &m->dest,
-                     (s_tx_hint.flags & GATT_TX_HINT_BOUNCEABLE) != 0,
-                     (s_tx_hint.flags & GATT_TX_HINT_TEST_ONLY) != 0);
+        display_text(TX_MARGIN_X, 60, FONT_S, COLOR_GRAY, to);
+        draw_address(76, (m->kind == TON_TX_MSG_JETTON || m->kind == TON_TX_MSG_NFT) ? &m->to : &m->dest,
+                     (s_tx_hint.flags & GATT_TX_HINT_BOUNCEABLE) != 0, testnet_hint);
 
-        line[0] = '\0';
+        int x;
         switch (m->kind) {
         case TON_TX_MSG_TRANSFER:
             if (m->has_comment && strlen(m->comment) > TX_INLINE_COMMENT_MAX) {
-                snprintf(line, sizeof(line), "Msg: next page");
+                display_text(TX_MARGIN_X, 128, FONT_S, COLOR_GRAY, "Msg: next page");
             } else if (m->has_comment) {
-                snprintf(line, sizeof(line), "Msg: %s", m->comment);
+                x = display_text(TX_MARGIN_X, 128, FONT_S, COLOR_GRAY, "Msg: ");
+                display_text(x, 128, FONT_S, COLOR_WHITE, m->comment);
             }
             break;
         case TON_TX_MSG_JETTON:
         case TON_TX_MSG_NFT:
             /* The TON riding along for gas — leftovers come back, but this
              * is what leaves the wallet. */
-            ton_tx_format_amount(m->ton, 9, DISPLAY_COLS - 9, amount, sizeof(amount));
-            snprintf(line, sizeof(line), "+%s GRAM gas", amount);
+            ton_tx_format_amount(m->ton, 9, (size_t)DISPLAY_COLS(FONT_S) - 11, amount, sizeof(amount));
+            x = display_text(TX_MARGIN_X, 128, FONT_S, COLOR_GRAY, "+");
+            x = display_text(x, 128, FONT_S, COLOR_WHITE, amount);
+            display_text(x, 128, FONT_S, COLOR_GRAY, " GRAM gas");
             break;
         case TON_TX_MSG_CALL:
             if (m->has_op) {
@@ -1241,12 +1332,11 @@ static void draw_tx_page(void)
             } else {
                 snprintf(line, sizeof(line), "no op code");
             }
+            display_text_centered(128, FONT_S, COLOR_ORANGE, line);
             break;
         }
-        display_draw_text_centered(7, line);
     }
-    snprintf(line, sizeof(line), "%s%s", s_tx.testnet ? "TESTNET " : "", last ? "Hold 1s = sign" : "Press = next");
-    display_draw_text_centered(DISPLAY_ROWS - 1, line);
+    display_footer(last ? "Hold 1s = sign" : "Press = next", last, s_tx.testnet);
     display_flush();
     display_unlock();
 }
@@ -1255,16 +1345,21 @@ static void draw_tx_page(void)
  * to be made at. Caller holds s_lock. */
 static void draw_proof_page(void)
 {
-    /* Room for what gcc thinks a date could print; display_draw_text clips
-     * at DISPLAY_COLS on its own. */
+    /* Room for what gcc thinks a date could print. */
     char line[48];
     display_lock();
     display_clear();
-    display_draw_text_centered(0, "Sign in to site:");
-    size_t len = strlen(s_proof.domain);
-    for (uint8_t row = 0; row < 5 && (size_t)row * DISPLAY_COLS < len; row++) {
-        snprintf(line, sizeof(line), "%.*s", (int)DISPLAY_COLS, s_proof.domain + (size_t)row * DISPLAY_COLS);
-        display_draw_text_centered(2 + row, line);
+    display_header("Sign in to site", COLOR_ACCENT);
+    /* Up to 104 characters in FONT_M, the longest a domain can be in
+     * FONT_S bold — a domain has no spaces, so it is cut at the line end. */
+    const size_t len = strlen(s_proof.domain);
+    const display_font_t *font = len <= 4 * (size_t)DISPLAY_COLS(FONT_M) ? FONT_M : FONT_S_BOLD;
+    const size_t cols = (size_t)DISPLAY_COLS(font);
+    const int rows = (int)((len + cols - 1) / cols);
+    const int y0 = DISPLAY_HEADER_H + (108 - rows * font->h) / 2;
+    for (int row = 0; row < rows; row++) {
+        snprintf(line, sizeof(line), "%.*s", (int)cols, s_proof.domain + (size_t)row * cols);
+        display_text_centered(y0 + row * font->h, font, COLOR_WHITE, line);
     }
     /* Like a request's expiry: host-chosen, and here to be compared with a
      * clock the owner has — a proof dated far ahead is one meant to be
@@ -1274,12 +1369,11 @@ static void draw_proof_page(void)
     if (s_proof.timestamp <= INT32_MAX && gmtime_r(&when, &utc) != NULL) {
         snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d UTC", utc.tm_year + 1900, utc.tm_mon + 1,
                  utc.tm_mday, utc.tm_hour, utc.tm_min);
+        display_text_centered(132, FONT_S, COLOR_GRAY, line);
     } else {
-        snprintf(line, sizeof(line), "time: far future");
+        display_text_centered(132, FONT_S, COLOR_ORANGE, "time: far future");
     }
-    display_draw_text_centered(DISPLAY_ROWS - 3, line);
-    snprintf(line, sizeof(line), "%sHold 1s = sign", s_proof.testnet ? "TESTNET " : "");
-    display_draw_text_centered(DISPLAY_ROWS - 1, line);
+    display_footer("Hold 1s = sign", true, s_proof.testnet);
     display_flush();
     display_unlock();
 }
@@ -1290,10 +1384,10 @@ static void draw_own_address_page(void)
 {
     display_lock();
     display_clear();
-    display_draw_text_centered(0, s_own_address.testnet ? "Your address (TESTNET)" : "Your address");
-    draw_address(4, &s_own_address.addr, false, s_own_address.testnet);
-    display_draw_text_centered(8, "Compare it with the app");
-    display_draw_text_centered(DISPLAY_ROWS - 1, "Press = done");
+    display_header("Your address", COLOR_ACCENT);
+    draw_address(44, &s_own_address.addr, false, s_own_address.testnet);
+    display_text_centered(110, FONT_S, COLOR_GRAY, "Compare it with the app");
+    display_footer("Press = done", false, s_own_address.testnet);
     display_flush();
     display_unlock();
 }
@@ -1482,7 +1576,7 @@ void gatt_svc_on_confirm_button(bool long_press)
         /* Reboot rather than trying to rewind every module's in-memory state
          * back to "fresh device" by hand — the next boot reads the now-empty
          * NVS and comes up in exactly the state a brand-new board is in. */
-        display_show_status("Factory Reset", "Erased,", "rebooting");
+        display_show_status(COLOR_ORANGE, "Factory Reset", "Erased,", "rebooting");
         vTaskDelay(pdMS_TO_TICKS(1500));
         esp_restart();
         return;
@@ -1566,7 +1660,7 @@ static void timeout_check_cb(void *arg)
          * put up within a few seconds of, say, "PIN Unlocked" used to be
          * wiped by this revert (seen on the board 2026-09-29). */
         if (display_frame_seq() == s_display_revert_frame) {
-            display_show_status("Quick Wallet", "Ready", NULL);
+            display_show_status(COLOR_ACCENT, "Quick Wallet", "Ready", NULL);
         }
     }
 }
@@ -1610,7 +1704,7 @@ void gatt_svc_on_disconnect(void)
         clear_pending();
         /* The confirm prompt is still on screen; without this it stays
          * there, looking armed, until the next status is drawn. */
-        display_show_status("Quick Wallet", "Ready", NULL);
+        display_show_status(COLOR_ACCENT, "Quick Wallet", "Ready", NULL);
     }
     UNLOCK();
 }
@@ -1627,22 +1721,22 @@ static void show_status_on_display(enum wallet_status status)
 {
     switch (status) {
     case WALLET_STATUS_NO_WALLET:
-        display_show_status("No Wallet", "Create via app", NULL);
+        display_show_status(COLOR_ACCENT, "No Wallet", "Create via app", NULL);
         break;
     case WALLET_STATUS_CREATE_AWAITING_CONFIRM:
-        display_show_status("Create Wallet", "Press button", "to confirm");
+        display_show_status(COLOR_ACCENT, "Create Wallet", "Press button", "to confirm");
         break;
     case WALLET_STATUS_CREATED:
-        display_show_status("Wallet", "Created", NULL);
+        display_show_status(COLOR_GREEN, "Wallet", "Created", NULL);
         break;
     case WALLET_STATUS_CREATE_REJECTED:
-        display_show_status("Create Wallet", "Rejected", "or timed out");
+        display_show_status(COLOR_RED, "Create Wallet", "Rejected", "or timed out");
         break;
     case WALLET_STATUS_CREATE_GENERATING:
-        display_show_status("Create Wallet", "Generating key...", "please wait");
+        display_show_status(COLOR_ACCENT, "Create Wallet", "Generating key...", "please wait");
         break;
     case WALLET_STATUS_PIN_NOT_SET:
-        display_show_status("Quick Wallet", "Set a PIN", "via app");
+        display_show_status(COLOR_ACCENT, "Quick Wallet", "Set a PIN", "via app");
         break;
     case WALLET_STATUS_AWAITING_CONFIRM:
         LOCK();
@@ -1650,88 +1744,88 @@ static void show_status_on_display(enum wallet_status status)
             draw_tx_page();
         } else {
             /* Only if the window closed between arming and this repaint. */
-            display_show_status("Sign Transaction", "Press button", "to confirm");
+            display_show_status(COLOR_ACCENT, "Sign Transaction", "Press button", "to confirm");
         }
         UNLOCK();
         break;
     case WALLET_STATUS_TX_INVALID:
-        display_show_status("Transaction", "Not understood,", "refused");
+        display_show_status(COLOR_RED, "Transaction", "Not understood,", "refused");
         break;
     case WALLET_STATUS_SIGNED:
-        display_show_status("Transaction", "Signed", NULL);
+        display_show_status(COLOR_GREEN, "Transaction", "Signed", NULL);
         break;
     case WALLET_STATUS_REJECTED:
-        display_show_status("Transaction", "Rejected", "or timed out");
+        display_show_status(COLOR_RED, "Transaction", "Rejected", "or timed out");
         break;
     case WALLET_STATUS_PIN_OK:
-        display_show_status("PIN", "Unlocked", NULL);
+        display_show_status(COLOR_GREEN, "PIN", "Unlocked", NULL);
         break;
     case WALLET_STATUS_SESSION_LOCKED:
-        display_show_status("Locked", "Unused 5 min", "Enter PIN in app");
+        display_show_status(COLOR_ORANGE, "Locked", "Unused 5 min", "Enter PIN in app");
         break;
     case WALLET_STATUS_PIN_WRONG:
-        display_show_status("PIN", "Wrong PIN", NULL);
+        display_show_status(COLOR_RED, "PIN", "Wrong PIN", NULL);
         break;
     case WALLET_STATUS_PIN_LOCKED:
-        display_show_status("PIN", "Locked out,", "try later");
+        display_show_status(COLOR_RED, "PIN", "Locked out,", "try later");
         break;
     case WALLET_STATUS_PIN_ALREADY_SET:
-        display_show_status("PIN", "Already set", NULL);
+        display_show_status(COLOR_ORANGE, "PIN", "Already set", NULL);
         break;
     case WALLET_STATUS_PIN_INVALID_LEN:
-        display_show_status("PIN", "Invalid length", NULL);
+        display_show_status(COLOR_RED, "PIN", "Invalid length", NULL);
         break;
     case WALLET_STATUS_SEED_AWAITING_CONFIRM:
-        display_show_status("Show Seed Phrase", "Press button", "to confirm");
+        display_show_status(COLOR_ACCENT, "Show Seed Phrase", "Press button", "to confirm");
         break;
     case WALLET_STATUS_SEED_SHOWING:
         /* show_seed_on_display() paints the actual word pages right after this
          * status is set — nothing generic to draw here. */
         break;
     case WALLET_STATUS_SEED_DONE:
-        display_show_status("Seed Phrase", "Done", NULL);
+        display_show_status(COLOR_GREEN, "Seed Phrase", "Done", NULL);
         break;
     case WALLET_STATUS_SEED_REJECTED:
-        display_show_status("Show Seed Phrase", "Rejected", "or timed out");
+        display_show_status(COLOR_RED, "Show Seed Phrase", "Rejected", "or timed out");
         break;
     case WALLET_STATUS_SEED_CHECKING:
         /* Painted by draw_seed_check(), like SEED_SHOWING. */
         break;
     case WALLET_STATUS_SEED_CHECKED:
-        display_show_status("Seed Phrase", "Written down", "correctly");
+        display_show_status(COLOR_GREEN, "Seed Phrase", "Written down", "correctly");
         break;
     case WALLET_STATUS_SEED_CHECK_FAILED:
-        display_show_status("Seed Phrase", "Check failed,", "view it again");
+        display_show_status(COLOR_RED, "Seed Phrase", "Check failed,", "view it again");
         break;
     case WALLET_STATUS_SEED_UNAVAILABLE:
-        display_show_status("Seed Phrase", "Not available", "for this wallet");
+        display_show_status(COLOR_ORANGE, "Seed Phrase", "Not available", "for this wallet");
         break;
     case WALLET_STATUS_PIN_SET_AWAITING_CONFIRM:
-        display_show_status("Set PIN", "Press button", "to confirm");
+        display_show_status(COLOR_ACCENT, "Set PIN", "Press button", "to confirm");
         break;
     case WALLET_STATUS_PIN_SET_REJECTED:
-        display_show_status("Set PIN", "Rejected", "or timed out");
+        display_show_status(COLOR_RED, "Set PIN", "Rejected", "or timed out");
         break;
     case WALLET_STATUS_PIN_CHANGE_AWAITING_CONFIRM:
-        display_show_status("Change PIN", "Press button", "to confirm");
+        display_show_status(COLOR_ACCENT, "Change PIN", "Press button", "to confirm");
         break;
     case WALLET_STATUS_PIN_CHANGED:
-        display_show_status("PIN", "Changed", NULL);
+        display_show_status(COLOR_GREEN, "PIN", "Changed", NULL);
         break;
     case WALLET_STATUS_PIN_CHANGE_REJECTED:
-        display_show_status("Change PIN", "Rejected", "or timed out");
+        display_show_status(COLOR_RED, "Change PIN", "Rejected", "or timed out");
         break;
     case WALLET_STATUS_WIPE_AWAITING_CONFIRM:
         /* Named as bluntly as it fits on the screen: this is the one
          * confirmation that destroys the key, so it must not read like the
          * routine ones above. */
-        display_show_status("ERASE WALLET?", "Press button", "to confirm");
+        display_show_status(COLOR_RED, "ERASE WALLET?", "Press button", "to confirm");
         break;
     case WALLET_STATUS_WIPED:
-        display_show_status("Factory Reset", "Erased", NULL);
+        display_show_status(COLOR_ORANGE, "Factory Reset", "Erased", NULL);
         break;
     case WALLET_STATUS_WIPE_REJECTED:
-        display_show_status("Erase Wallet", "Rejected", "or timed out");
+        display_show_status(COLOR_RED, "Erase Wallet", "Rejected", "or timed out");
         break;
     case WALLET_STATUS_PROOF_AWAITING_CONFIRM:
         LOCK();
@@ -1741,16 +1835,16 @@ static void show_status_on_display(enum wallet_status status)
         UNLOCK();
         break;
     case WALLET_STATUS_PROOF_SIGNED:
-        display_show_status("Sign In", "Signed", NULL);
+        display_show_status(COLOR_GREEN, "Sign In", "Signed", NULL);
         break;
     case WALLET_STATUS_PROOF_REJECTED:
-        display_show_status("Sign In", "Rejected", "or timed out");
+        display_show_status(COLOR_RED, "Sign In", "Rejected", "or timed out");
         break;
     case WALLET_STATUS_PROOF_INVALID:
-        display_show_status("Sign In", "Not understood,", "refused");
+        display_show_status(COLOR_RED, "Sign In", "Not understood,", "refused");
         break;
     case WALLET_STATUS_BUSY:
-        display_show_status("Busy", "Finish the other", "request first");
+        display_show_status(COLOR_ORANGE, "Busy", "Finish the other", "request first");
         break;
     case WALLET_STATUS_ADDRESS_SHOWING:
         LOCK();
@@ -1761,7 +1855,7 @@ static void show_status_on_display(enum wallet_status status)
         break;
     case WALLET_STATUS_IDLE:
     default:
-        display_show_status("Quick Wallet", "Ready", NULL);
+        display_show_status(COLOR_ACCENT, "Quick Wallet", "Ready", NULL);
         break;
     }
 

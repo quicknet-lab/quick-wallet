@@ -171,9 +171,17 @@ int gap_event_cb(struct ble_gap_event *event, void *arg)
             } while (passkey >= 4294000000u);
             passkey %= 1000000;
 
+            /* Split in two halves of three, large: it is read off the
+             * screen and typed in on the phone. */
             char line[32];
-            snprintf(line, sizeof(line), "%06" PRIu32, passkey);
-            display_show_status("Pairing Code", line, "Enter on phone");
+            snprintf(line, sizeof(line), "%03" PRIu32 " %03" PRIu32, passkey / 1000, passkey % 1000);
+            display_lock();
+            display_clear();
+            display_header("Pairing Code", COLOR_ACCENT);
+            display_text_centered(50, FONT_L, COLOR_WHITE, line);
+            display_text_centered(104, FONT_S, COLOR_GRAY, "Enter on phone");
+            display_flush();
+            display_unlock();
             ESP_LOGI(TAG, "displaying pairing passkey");
 
             struct ble_sm_io io = {
@@ -206,7 +214,7 @@ int gap_event_cb(struct ble_gap_event *event, void *arg)
         s_repeat_pairing_pending_since_us = esp_timer_get_time();
         s_repeat_pairing_peer_addr = desc.peer_id_addr;
         ESP_LOGW(TAG, "repeat pairing attempt — press the confirm button within 30s to allow it");
-        display_show_status("Re-pair Attempt", "Press button", "to allow (30s)");
+        display_show_status(COLOR_ORANGE, "Re-pair Attempt", "Press button", "to allow (30s)");
         return BLE_GAP_REPEAT_PAIRING_IGNORE;
     }
 
@@ -289,7 +297,7 @@ static void on_confirm_button(bool long_press, void *arg)
         if (esp_timer_get_time() - s_repeat_pairing_pending_since_us <= REPEAT_PAIRING_CONFIRM_TIMEOUT_US) {
             ble_store_util_delete_peer(&s_repeat_pairing_peer_addr);
             ESP_LOGI(TAG, "repeat-pairing confirmed — stale bond removed, central may re-pair now");
-            display_show_status("Re-pair", "Allowed,", "pair again");
+            display_show_status(COLOR_GREEN, "Re-pair", "Allowed,", "pair again");
             return;
         }
         ESP_LOGW(TAG, "repeat-pairing window expired — press handled as an ordinary one");

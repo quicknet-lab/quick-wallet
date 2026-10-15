@@ -19,7 +19,7 @@ set(EXCLUDE_COMPONENTS
 # available (see GATT_CHR_VERSION_UUID). Set explicitly rather than left to
 # IDF's `git describe` fallback, which yields a commit-ish string that
 # nothing can meaningfully order. Bump on every released firmware build.
-set(PROJECT_VER "1.0.0")
+set(PROJECT_VER "1.1.0")
 
 # There is no "default" configuration in this project, deliberately. Every
 # setting in config/*.conf is a property of one chip and one board — flash

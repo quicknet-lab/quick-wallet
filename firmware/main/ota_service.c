@@ -124,12 +124,12 @@ static void draw_switch_prompt(void)
     char line[48];
     display_lock();
     display_clear();
-    display_draw_text_centered(0, "Install firmware?");
-    snprintf(line, sizeof(line), "New: %s", s_incoming_version);
-    display_draw_text_centered(3, line);
-    snprintf(line, sizeof(line), "Now: %s", esp_app_get_description()->version);
-    display_draw_text_centered(4, line);
-    display_draw_text_centered(DISPLAY_ROWS - 1, "Press = install");
+    display_header("Install firmware?", COLOR_ACCENT);
+    display_text_centered(40, display_text_width(FONT_L, s_incoming_version) <= DISPLAY_W ? FONT_L : FONT_M,
+                          COLOR_WHITE, s_incoming_version);
+    snprintf(line, sizeof(line), "now: %s", esp_app_get_description()->version);
+    display_text_centered(84, FONT_S, COLOR_GRAY, line);
+    display_footer("Press = install", true, false);
     display_flush();
     display_unlock();
 }
@@ -138,23 +138,23 @@ static void show_status_on_display(enum ota_status status)
 {
     switch (status) {
     case OTA_STATUS_AWAITING_CONFIRM:
-        display_show_status("OTA Update", "Press button", "to confirm");
+        display_show_status(COLOR_ACCENT, "OTA Update", "Press button", "to confirm");
         break;
     case OTA_STATUS_PREPARING:
     case OTA_STATUS_IN_PROGRESS:
-        display_show_status("OTA Update", "Installing...", NULL);
+        display_show_status(COLOR_ACCENT, "OTA Update", "Installing...", NULL);
         break;
     case OTA_STATUS_SUCCESS:
-        display_show_status("OTA Update", "Success,", "rebooting");
+        display_show_status(COLOR_GREEN, "OTA Update", "Success,", "rebooting");
         break;
     case OTA_STATUS_ERROR:
-        display_show_status("OTA Update", "Error", NULL);
+        display_show_status(COLOR_RED, "OTA Update", "Error", NULL);
         break;
     case OTA_STATUS_AWAITING_SWITCH:
         draw_switch_prompt();
         break;
     case OTA_STATUS_DOWNGRADE:
-        display_show_status("OTA Update", "Older version,", "refused");
+        display_show_status(COLOR_RED, "OTA Update", "Older version,", "refused");
         break;
     case OTA_STATUS_IDLE:
     default:
