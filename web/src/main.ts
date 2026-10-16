@@ -582,6 +582,7 @@ app.innerHTML = `
       <div class="form">
         <div class="fields">
           <div class="field"><span>Version</span><code id="flash-modal-version"></code></div>
+          <div class="field"><span>Board</span><code>LilyGO T-Display-S3</code></div>
           <div class="field"><span>Chip</span><code id="flash-modal-chip"></code></div>
           <div class="field"><span>Download</span><code id="flash-modal-size"></code></div>
         </div>
@@ -601,9 +602,17 @@ app.innerHTML = `
         <p class="danger-note">Everything currently on the device is erased,
         including any wallet key already on it. Do this on a new device — or on
         one whose 24-word phrase you have written down.</p>
+        <p class="danger-note">This firmware runs <b>only on the LilyGO T-Display-S3</b>
+        with the 1.9" LCD screen. Any other board, the T-Display-S3 AMOLED, Pro,
+        Long and Touch among them, is locked by the install all the same but
+        never starts the wallet, and cannot be reinstalled afterwards.</p>
+        <label class="switch-row" for="flash-modal-board-ok">
+          <span class="menu-text"><b>This is a LilyGO T-Display-S3</b><small>The plain one with the 1.9" LCD — not AMOLED, Pro, Long or Touch.</small></span>
+          <input id="flash-modal-board-ok" class="switch" type="checkbox" />
+        </label>
         <p class="note">You'll be asked to pick the device's USB port next. Leave it plugged
         in until the install finishes.</p>
-        <button type="button" id="flash-modal-confirm" class="btn btn-danger btn-block">I understand — install it</button>
+        <button type="button" id="flash-modal-confirm" class="btn btn-danger btn-block" disabled>I understand — install it</button>
         <button type="button" id="flash-modal-cancel" class="btn btn-ghost btn-block">Cancel</button>
       </div>
     </div>
@@ -672,6 +681,7 @@ const flashModalChip = document.querySelector<HTMLElement>('#flash-modal-chip')!
 const flashModalDevNote = document.querySelector<HTMLElement>('#flash-modal-dev-note')!;
 const flashModalSecureNote = document.querySelector<HTMLElement>('#flash-modal-secure-note')!;
 const flashModalSize = document.querySelector<HTMLElement>('#flash-modal-size')!;
+const flashModalBoardOk = document.querySelector<HTMLInputElement>('#flash-modal-board-ok')!;
 const flashModalConfirmBtn = document.querySelector<HTMLButtonElement>('#flash-modal-confirm')!;
 const flashModalCancelBtn = document.querySelector<HTMLButtonElement>('#flash-modal-cancel')!;
 const pinChangeForm = document.querySelector<HTMLFormElement>('#pin-change-form')!;
@@ -3183,6 +3193,8 @@ flashBtn.addEventListener('click', async () => {
     flashModalDevNote.hidden = release.flash.secure;
     flashModalSecureNote.hidden = !release.flash.secure;
     flashModalSize.textContent = humanSize(images.reduce((sum, image) => sum + image.byteLength, 0));
+    flashModalBoardOk.checked = false;
+    flashModalConfirmBtn.disabled = true;
     statusEl.hidden = true;
     flashModalOverlay.hidden = false;
   } catch (err) {
@@ -3192,9 +3204,16 @@ flashBtn.addEventListener('click', async () => {
   }
 });
 
+// The installer can only tell the chip apart, and every LilyGO look-alike
+// carries the same ESP32-S3R8 with the same memory: whether it's the right
+// board is the owner's word alone.
+flashModalBoardOk.addEventListener('change', () => {
+  flashModalConfirmBtn.disabled = !flashModalBoardOk.checked;
+});
+
 flashModalConfirmBtn.addEventListener('click', () => {
   const job = pendingFlash;
-  if (!job) return;
+  if (!job || !flashModalBoardOk.checked) return;
   closeFlashModal();
   // Started, not awaited, straight out of the click handler: the browser's
   // USB port picker only opens while this click still counts as a gesture.
