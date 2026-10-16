@@ -2,13 +2,19 @@
 
 # Quick Wallet
 
-A hardware wallet for TON on a small board with a screen and a button. The
+A hardware wallet for TON on the **LilyGO T-Display-S3** board. The
 private key is generated on the board and never leaves it. Every transfer is
 shown on the board's own screen and signed only when you press its button.
 You use it from a web page in the browser over Bluetooth — there is no app to
 install.
 
 **Open the wallet: https://wallet.quicknet.cc**
+
+> **Supported board: LilyGO T-Display-S3 only** — the plain one with the
+> 1.9" LCD screen (ESP32-S3R8, 16 MB flash). The T-Display-S3 AMOLED, Pro,
+> Long and Touch are different boards and do not work. Installing the
+> firmware on any other board locks it for good, and the wallet will never
+> start on it.
 
 ## How it keeps your funds safe
 
@@ -43,8 +49,9 @@ install.
 
 ## What you need
 
-- A **LilyGO T-Display-S3** board (ESP32-S3, 1.9" screen) and a USB-C cable.
-  No other board is supported.
+- A **LilyGO T-Display-S3** board (ESP32-S3R8, 1.9" LCD screen) and a
+  USB-C cable. No other board is supported, the T-Display-S3 AMOLED, Pro,
+  Long and Touch included.
 - **Chrome or Edge** on a computer, or **Chrome on Android**.
 - **iPhone and Safari do not work**: they have no Web Bluetooth.
 - Paper and a pen for the 24 words.

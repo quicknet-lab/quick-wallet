@@ -29,6 +29,10 @@
 
 ## What you need
 
+- A **LilyGO T-Display-S3** board — the plain one with the 1.9" LCD screen —
+  and a USB-C cable. No other board is supported, the T-Display-S3 AMOLED,
+  Pro, Long and Touch included: the firmware locks any board it is installed
+  on, and on another board the wallet never starts.
 - Chrome or Edge on a computer, or Chrome on Android.
 - **iPhone and Safari will not work**: they have no Web Bluetooth, and no
   setting changes that.
