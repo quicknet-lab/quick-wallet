@@ -2,6 +2,11 @@
 
 # Quick Wallet
 
+<p align="center">
+  <img src="docs/t-display-s3.jpg" width="420" alt="LilyGO T-Display-S3 in its black case">
+  <br><sub>Photo: LILYGO</sub>
+</p>
+
 A hardware wallet for TON on the **LilyGO T-Display-S3** board. The
 private key is generated on the board and never leaves it. Every transfer is
 shown on the board's own screen and signed only when you press its button.
