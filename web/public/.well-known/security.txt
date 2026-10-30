@@ -1,4 +1,4 @@
-Contact: mailto:admin@quicknet.cc
+Contact: https://github.com/quicknet-lab/quick-wallet/security/advisories/new
 Expires: 2027-10-29T00:00:00.000Z
 Preferred-Languages: en, ru
 Canonical: https://wallet.quicknet.cc/.well-known/security.txt
