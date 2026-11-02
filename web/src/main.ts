@@ -17,7 +17,6 @@ import {
 import { SEND_ALL_RESERVE_NANO, formatOwnAddress } from './validation';
 import {
   KNOWN_MAINNET_JETTONS,
-  TOKEN_TRANSFER_GAS,
   findKnownMainnetJetton,
   formatUnits,
   parseUnits,
@@ -286,12 +285,11 @@ app.innerHTML = `
               <div class="leg">
                 <div class="leg-head">
                   <span class="leg-label">From</span>
-                  <span id="swap-from-balance" class="leg-balance" hidden></span>
+                  <button type="button" id="swap-from-balance" class="leg-balance" hidden></button>
                 </div>
                 <button type="button" id="swap-from-btn" class="token-pill" aria-label="From asset"></button>
                 <div class="leg-amount">
                   <input id="swap-from-amount" class="amount-input" type="text" inputmode="decimal" placeholder="0" aria-label="Amount" autocomplete="off" required />
-                  <!-- TEMPORARILY hidden (0.0.x): the ALL fit to the quote's gas is not yet checked on the board. --><button type="button" id="swap-max-btn" class="chip-btn chip-small" hidden>ALL</button>
                 </div>
               </div>
               <button type="button" id="swap-flip-btn" class="flip" title="Swap direction" aria-label="Swap direction">${ic('swap')}</button>
@@ -716,10 +714,9 @@ const swapBody = document.querySelector<HTMLDivElement>('#swap-body')!;
 const swapQuoteForm = document.querySelector<HTMLFormElement>('#swap-quote-form')!;
 const swapFromBtn = document.querySelector<HTMLButtonElement>('#swap-from-btn')!;
 const swapFromAmountInput = document.querySelector<HTMLInputElement>('#swap-from-amount')!;
-const swapMaxBtn = document.querySelector<HTMLButtonElement>('#swap-max-btn')!;
 const swapFlipBtn = document.querySelector<HTMLButtonElement>('#swap-flip-btn')!;
 const swapToBtn = document.querySelector<HTMLButtonElement>('#swap-to-btn')!;
-const swapFromBalanceEl = document.querySelector<HTMLElement>('#swap-from-balance')!;
+const swapFromBalanceEl = document.querySelector<HTMLButtonElement>('#swap-from-balance')!;
 const swapToBalanceEl = document.querySelector<HTMLElement>('#swap-to-balance')!;
 const addTokenForm = document.querySelector<HTMLFormElement>('#add-token-form')!;
 const addTokenInput = document.querySelector<HTMLInputElement>('#add-token-input')!;
@@ -1473,6 +1470,7 @@ function renderSwapLegs() {
   renderTokenPill(swapFromBtn, catalog.find((o) => o.value === swapFromValue));
   renderTokenPill(swapToBtn, catalog.find((o) => o.value === swapToValue));
   renderLegBalance(swapFromBalanceEl, catalog.find((o) => o.value === swapFromValue));
+  swapFromBalanceEl.title = `${swapFromBalanceEl.title} — tap to swap all`;
   renderLegBalance(swapToBalanceEl, catalog.find((o) => o.value === swapToValue));
 }
 
@@ -1529,22 +1527,20 @@ swapToBtn.addEventListener('click', () => {
 });
 
 /**
- * The full amount the ALL button would fill in for the current "from"
- * asset. For TON, `TOKEN_TRANSFER_GAS` is held back — Omniston attaches the
- * swap's own gas on top of the input amount, so offering the literal full
- * balance would build a transaction the wallet can't actually cover.
+ * The full amount a tap on the "from" balance fills in. A token swaps its
+ * whole balance; GRAM starts from the balance less the reserves, and each
+ * quote then takes its own gas budget off that (see swapAllAmount).
  */
 function swapFromMaxUnits(): { units: bigint; decimals: number } {
   const jetton = selectedSwapFromJetton();
   if (jetton) return { units: jetton.balance, decimals: jetton.decimals };
-  const units = lastTonBalance > TOKEN_TRANSFER_GAS ? lastTonBalance - TOKEN_TRANSFER_GAS : 0n;
-  return { units, decimals: 9 };
+  return { units: swapAllAmount(lastTonBalance, 0n), decimals: 9 };
 }
 
-/** Set by ALL on a GRAM swap: the amount is re-fitted to each quote's gas budget until the user types their own. */
+/** Set by a tap on the balance on a GRAM swap: the amount is re-fitted to each quote's gas budget until the user types their own. */
 let swapAllPending = false;
 
-swapMaxBtn.addEventListener('click', () => {
+swapFromBalanceEl.addEventListener('click', () => {
   const { units, decimals } = swapFromMaxUnits();
   swapAllPending = !selectedSwapFromJetton();
   swapFromAmountInput.value = formatUnits(units, decimals);
@@ -1806,11 +1802,11 @@ function refreshSwapQuote() {
             return;
           }
           if (swapAllPending && from.kind === 'native' && quote.gasBudget !== undefined) {
-            // ALL: leave the quote's own gas budget and the fee reserve, then ask again.
+            // Swap all: leave the quote's own gas budget and the reserves, then ask again.
             const fitted = swapAllAmount(lastTonBalance, BigInt(quote.gasBudget));
             if (fitted === 0n) {
               clearSwapOutput();
-              setSwapLive('Not enough GRAM left to pay for the swap\'s gas.', 'error');
+              setSwapLive('Not enough GRAM to pay for this swap\'s gas and keep enough for a swap back.', 'error');
               return;
             }
             // Only ever down: a route whose gas moves with the amount can't make this loop.

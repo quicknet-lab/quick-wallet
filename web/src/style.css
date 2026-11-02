@@ -1043,6 +1043,18 @@ select option {
   height: 18px;
 }
 
+button.leg-balance {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+}
+
+button.leg-balance:not(:disabled):hover,
+button.leg-balance:not(:disabled):active {
+  color: var(--accent);
+}
+
 .leg-amount {
   display: flex;
   align-items: center;

@@ -67,16 +67,27 @@ export function decodeSwapTransaction(messages: {
 export const SWAP_MAX_GAS_PER_MESSAGE = toNano('0.5');
 
 /**
- * What the ALL button swaps when the input is GRAM: the whole balance less the
- * quote's gas budget (Omniston attaches it on top of the input amount) and a
- * network-fee reserve, so the swap can still pay for itself. 0 when nothing is
- * left over.
+ * GRAM a swap back from a token needs on the balance: such a swap attaches
+ * about 0.15 GRAM of gas (most of it comes back) and assertAffordable() wants
+ * FEE_RESERVE_NANO left on top.
+ */
+const SWAP_BACK_RESERVE = toNano('0.2');
+
+/**
+ * What "swap all" swaps when the input is GRAM. It keeps whichever is larger:
+ * the quote's gas budget (Omniston attaches it on top of the input amount)
+ * with twice the fee reserve, so this swap can pay for itself, or enough for a
+ * swap back with one fee reserve for this swap's own cost. The unspent gas of
+ * this swap comes back a few seconds later, so it counts towards the swap back.
+ * 0 when nothing is left over.
  */
 export function swapAllAmount(balance: bigint, gasBudget: bigint): bigint {
   // Twice the fee reserve: assertAffordable() wants that reserve left after
   // the whole message value, so the same amount again is the slack for a
   // route that attaches a little more than its budget.
-  const left = balance - gasBudget - FEE_RESERVE_NANO * 2n;
+  const forThisSwap = gasBudget + FEE_RESERVE_NANO * 2n;
+  const forSwapBack = SWAP_BACK_RESERVE + FEE_RESERVE_NANO;
+  const left = balance - (forThisSwap > forSwapBack ? forThisSwap : forSwapBack);
   return left > 0n ? left : 0n;
 }
 

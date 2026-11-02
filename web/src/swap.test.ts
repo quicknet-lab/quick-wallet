@@ -238,12 +238,17 @@ describe('checkSwapTransaction', () => {
 });
 
 describe('swapAllAmount', () => {
-  it('leaves the gas budget and the fee reserve', () => {
-    expect(swapAllAmount(toNano('10'), toNano('0.1'))).toBe(toNano('9.8'));
+  it('leaves enough for a swap back when this swap needs less', () => {
+    expect(swapAllAmount(toNano('10'), 0n)).toBe(toNano('9.75'));
+    expect(swapAllAmount(toNano('10'), toNano('0.1'))).toBe(toNano('9.75'));
+  });
+
+  it('leaves the gas budget and the fee reserve when this swap needs more', () => {
+    expect(swapAllAmount(toNano('10'), toNano('0.3'))).toBe(toNano('9.6'));
   });
 
   it('is zero when the balance cannot cover them', () => {
-    expect(swapAllAmount(toNano('0.2'), toNano('0.1'))).toBe(0n);
+    expect(swapAllAmount(toNano('0.25'), toNano('0.1'))).toBe(0n);
     expect(swapAllAmount(toNano('0.05'), toNano('0.1'))).toBe(0n);
   });
 });
