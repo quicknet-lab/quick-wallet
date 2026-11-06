@@ -63,6 +63,10 @@ void display_clear(void);
 
 /* A filled rectangle, clipped to the panel. */
 void display_fill(int x, int y, int w, int h, uint16_t color);
+/* A side x side grid of bits (row-major, least significant bit first in
+ * each byte), each set bit drawn as a scale x scale square in color; clear
+ * bits leave what is under them. The bits are copied into the frame. */
+void display_bits(int x, int y, int side, int scale, uint16_t color, const uint8_t *bits);
 
 /* Text with its top-left corner at (x, y), one line, clipped at the panel
  * edges (no wrapping). Characters outside printable ASCII are drawn as

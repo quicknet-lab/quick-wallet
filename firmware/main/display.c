@@ -70,13 +70,14 @@ static SemaphoreHandle_t s_band_done;
  * is a layout bug, logged and dropped. */
 #define MAX_OPS   96
 #define TEXT_POOL 2048
-enum op_kind { OP_FILL, OP_TEXT, OP_LOGO };
+enum op_kind { OP_FILL, OP_TEXT, OP_LOGO, OP_BITS };
 struct op {
     uint8_t kind;
     int16_t x, y, w, h;
     uint16_t color;
     const display_font_t *font;
-    uint16_t text_off, text_len;
+    uint16_t text_off, text_len; /* OP_BITS: its bits, in the same pool */
+    uint8_t scale;               /* OP_BITS: pixels per bit, each way */
 };
 static struct op s_ops[MAX_OPS];
 static size_t s_n_ops;
@@ -244,6 +245,27 @@ void display_fill(int x, int y, int w, int h, uint16_t color)
     }
 }
 
+void display_bits(int x, int y, int side, int scale, uint16_t color, const uint8_t *bits)
+{
+    size_t len = ((size_t)side * side + 7) / 8;
+    if (len > TEXT_POOL - s_text_used) {
+        ESP_LOGE(TAG, "frame text full, element dropped");
+        return;
+    }
+    struct op *op = add_op(OP_BITS);
+    if (op != NULL) {
+        op->x = (int16_t)x;
+        op->y = (int16_t)y;
+        op->w = op->h = (int16_t)side;
+        op->scale = (uint8_t)scale;
+        op->color = color;
+        op->text_off = (uint16_t)s_text_used;
+        op->text_len = (uint16_t)len;
+        memcpy(&s_text[s_text_used], bits, len);
+        s_text_used += len;
+    }
+}
+
 int display_text_width(const display_font_t *font, const char *text)
 {
     return (int)strlen(text) * font->w;
@@ -347,6 +369,24 @@ static void render_fill(const struct op *op, int band_y)
     }
 }
 
+static void render_bits(const struct op *op, int band_y)
+{
+    const uint8_t *bits = (const uint8_t *)&s_text[op->text_off];
+    const int side_px = op->w * op->scale;
+    int y0 = op->y > band_y ? op->y : band_y;
+    int y1 = (op->y + side_px < band_y + BAND_H) ? op->y + side_px : band_y + BAND_H;
+    for (int y = y0; y < y1; y++) {
+        const int row = (y - op->y) / op->scale;
+        for (int px = 0; px < side_px; px++) {
+            const int x = op->x + px;
+            const int i = row * op->w + px / op->scale;
+            if (x >= 0 && x < PANEL_H_RES && (bits[i / 8] >> (i % 8) & 1)) {
+                s_band[(y - band_y) * PANEL_H_RES + x] = op->color;
+            }
+        }
+    }
+}
+
 static void render_logo(int band_y);
 
 /* Renders the frame band by band and sends each one. */
@@ -366,6 +406,9 @@ static esp_err_t paint_frame(void)
                 break;
             case OP_LOGO:
                 render_logo(y);
+                break;
+            case OP_BITS:
+                render_bits(&s_ops[i], y);
                 break;
             }
         }

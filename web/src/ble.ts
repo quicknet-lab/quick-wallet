@@ -61,6 +61,8 @@ export const WalletStatus = {
   AddressDone: 38,
   /** Pushed unprompted: the unlocked session went unused and locked itself. */
   SessionLocked: 39,
+  /** Read on connecting only: a wallet whose backup-phrase check was never passed. */
+  SeedUnchecked: 40,
 } as const;
 export type WalletStatus = (typeof WalletStatus)[keyof typeof WalletStatus];
 

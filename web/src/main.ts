@@ -2298,6 +2298,10 @@ function enterPinGate(message: string, mode: 'set' | 'unlock') {
 /** Set on connect: the device has a PIN but no wallet yet (or no PIN at
  * all), so a correct PIN leads to wallet creation rather than the wallet. */
 let walletMissing = false;
+/** Set on connect: the device has a wallet whose backup-phrase check was cut
+ * short (lost connection, closed tab, power), so a correct PIN leads back to
+ * the check rather than the wallet. The device remembers this, not the page. */
+let seedUnchecked = false;
 
 function enterCreateWallet() {
   connectSection.hidden = true;
@@ -2306,12 +2310,16 @@ function enterCreateWallet() {
   showStatus('Unlocked — no wallet on this device yet. Create one.', 'info');
 }
 
-function enterSeedPrompt() {
+function enterSeedPrompt(resumed = false) {
   connectSection.hidden = true;
   createWalletSection.hidden = true;
   seedPromptSection.hidden = false;
   seedPromptContinueBtn.hidden = true; // only revealed once the on-device viewing has run to completion — see runShowSeed()
-  showStatus('Wallet created.', 'success');
+  if (resumed) {
+    showStatus('The backup phrase check was not finished. Pass it to open the wallet.', 'info');
+  } else {
+    showStatus('Wallet created.', 'success');
+  }
 }
 
 connectBtn.addEventListener('click', async () => {
@@ -2324,6 +2332,7 @@ connectBtn.addEventListener('click', async () => {
     // The PIN comes first on the device: the wallet key is encrypted under
     // it the moment it is created, so a blank device asks for a PIN, and one
     // with a PIN but no wallet yet is unlocked before creating one.
+    seedUnchecked = status === WalletStatus.SeedUnchecked;
     if (status === WalletStatus.PinNotSet) {
       walletMissing = true;
       enterPinGate('Connected — a new device. Set a PIN to begin.', 'set');
@@ -2333,7 +2342,12 @@ connectBtn.addEventListener('click', async () => {
     walletMissing = status === WalletStatus.NoWallet;
     enterPinGate('Connected — enter the device PIN to continue.', 'unlock');
   } catch (err) {
-    showStatus(`Connection failed: ${(err as Error).message}`, 'error');
+    // The device drops a first-time pairing unless its button was pressed
+    // within the minute before (firmware main.c, PAIRING_WINDOW_US).
+    showStatus(
+      `Connection failed: ${(err as Error).message}. Connecting this computer or phone for the first time? Press the button on the device, then connect within a minute.`,
+      'error',
+    );
   } finally {
     connectBtn.disabled = false;
   }
@@ -2390,6 +2404,7 @@ async function runShowSeed(check = false): Promise<WalletStatus> {
   if (status === WalletStatus.SeedDone) {
     showStatus('Done — the phrase is back off-screen on the device.', 'success');
   } else if (status === WalletStatus.SeedChecked) {
+    seedUnchecked = false;
     showStatus('Checked — your written copy matches the device.', 'success');
   } else if (status === WalletStatus.SeedCheckFailed) {
     showStatus(
@@ -2461,6 +2476,10 @@ async function handlePinResult(status: WalletStatus, inputEl: HTMLInputElement) 
   if (status === WalletStatus.PinOk) {
     if (walletMissing) {
       enterCreateWallet();
+      return;
+    }
+    if (seedUnchecked) {
+      enterSeedPrompt(true);
       return;
     }
     await enterWalletSection();

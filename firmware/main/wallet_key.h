@@ -41,6 +41,13 @@ bool wallet_key_pin_set(void);
  * which status the device starts in. */
 bool wallet_key_exists(void);
 
+/* A wallet exists whose owner has not yet passed the backup-phrase check
+ * (gatt_svc.h, GATT_SHOW_SEED_OP_START_CHECK). Set on creation, kept across
+ * restarts and disconnects until wallet_key_mark_seed_checked(). Known
+ * without unlocking; a wallet created before this flag existed reads false. */
+bool wallet_key_seed_unchecked(void);
+void wallet_key_mark_seed_checked(void);
+
 /* First PIN, on a device with none: seals an empty secret under it and
  * leaves the device unlocked. REFUSED if a PIN is already set. */
 wallet_key_result_t wallet_key_set_pin(const uint8_t *pin, size_t len);

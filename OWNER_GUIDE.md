@@ -47,13 +47,18 @@ effect on the screen, it was the wrong button.
 
 ## First connection
 
-1. Open the app and press **Connect to device**.
-2. The board's screen shows a **Pairing Code**, six digits. Enter it on the
+1. Press the button on the board. Its screen shows **Pairing / Open for
+   60 s**: a phone or computer that has never connected to the board can
+   pair with it only within that minute. Outside it the board refuses the
+   pairing and shows **Press the button, then pair again**. Phones and
+   computers already paired connect without pressing anything.
+2. Open the app and press **Connect to device**.
+3. The board's screen shows a **Pairing Code**, six digits. Enter it on the
    computer or phone when the system asks for it.
    The code protects against a device being impersonated over the air: if
    the system did not ask for a code and the screen did not show one,
    disconnect and do not continue.
-3. On a new board, **set the PIN** first (see [PIN](#pin)) and press the
+4. On a new board, **set the PIN** first (see [PIN](#pin)) and press the
    button on the board to store it. The wallet key is encrypted under this
    PIN the moment it is created, so the PIN comes before the wallet.
 
@@ -71,7 +76,10 @@ effect on the screen, it was the wrong button.
    wrote down: a short press moves to the next word, holding the button for
    a second picks the highlighted one. A wrong pick ends the check; view the
    phrase again and correct your copy. The app will not let you continue
-   until the check passes.
+   until the check passes. If the check is cut short (the connection
+   drops, the tab is closed, the board loses power), the app brings you
+   back to it after the next PIN, and until it passes the board shows
+   **Backup not checked** under **Ready**.
 5. **Continue to the wallet**.
 
 The board checks only three of the 24 words. To check the whole phrase
@@ -122,9 +130,10 @@ lost with it — the 24 words are all you need.
 **Receive** shows the wallet's address. Before you hand it to anyone (an
 exchange above all), press **Check on device**: the board works the address
 out from its own key and shows it in full under **Your address**. Compare
-every character with the one in the app, then press the button. If they
-differ, do not use the address — the page or the "board" you are connected
-to is not genuine.
+every character with the one in the app. If they differ, do not use the
+address — the page or the "board" you are connected to is not genuine.
+A press then shows the same address as a QR code, which another wallet app
+can scan straight off the board; another press closes it.
 
 ## Sending
 
@@ -184,6 +193,13 @@ checks that a swap cannot take more than the amount you entered, but where
 the swapped amount actually goes cannot be verified. Only swap amounts you
 can afford to lose.
 
+To swap everything, tap the balance above the **From** amount. A token
+balance goes in whole. For GRAM the app leaves about 0.25 GRAM in the
+wallet: the swap's own fee and enough to swap the token back later. A token
+swap carries about 0.15 GRAM of gas, most of which comes back. If a swap
+back right after the first swap says there is not enough GRAM, wait a few
+seconds for the first swap's unspent gas to return.
+
 ## Connecting to sites (TON Connect)
 
 Sites such as exchanges, games or NFT markets connect to the wallet through
@@ -230,8 +246,9 @@ Limits:
 ## If the screen says "Re-pair Attempt"
 
 Someone is trying to pair with the board again. Press the button **only if
-it is you** re-pairing your own phone or computer. Otherwise, press
-nothing: the request expires on its own.
+it is you** re-pairing your own phone or computer: the press also opens the
+pairing window, so pair again within a minute. Otherwise, press nothing:
+the request expires on its own.
 
 ## Firmware updates
 

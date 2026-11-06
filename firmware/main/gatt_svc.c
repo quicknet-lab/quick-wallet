@@ -24,6 +24,7 @@
 #include "ton_tx.h"
 #include "ton_proof.h"
 #include "ton_jetton.h"
+#include "qrcodegen.h"
 
 static const char *TAG = "gatt_svc";
 
@@ -273,6 +274,7 @@ static void set_rejected_status(enum pending_op op)
 static struct {
     ton_tx_addr_t addr;
     bool testnet;
+    bool qr_page; /* the second page: the same address as a QR code */
 } s_own_address;
 
 /* Buffered PIN for PENDING_PIN_SET / PENDING_PIN_CHANGE — held only between
@@ -1042,6 +1044,8 @@ static void seed_check_start_locked(void)
 /* Caller holds s_lock. Takes the phrase, and anything derived from it, off
  * the device's memory; the caller repaints the screen by reporting a
  * status. */
+static void draw_ready(void);
+
 static void seed_end_locked(void)
 {
     seed_showing = false;
@@ -1380,14 +1384,59 @@ static void draw_proof_page(void)
 
 /* This wallet's own address, in the form the app shows for receiving. Caller
  * holds s_lock. */
+/* Caller holds s_lock. The address as a ton://transfer link, which wallet
+ * apps open as "send to this address": scanned straight off the device, it
+ * never passes through the web app. Version 4 at 3 px a module, with the
+ * 4-module light margin scanners need, fits between header and footer. */
+#define QR_MAX_VERSION 5
+static void draw_own_address_qr(void)
+{
+    static uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION)];
+    static uint8_t tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION)];
+    char link[sizeof("ton://transfer/") + TON_TX_ADDR_STR_LEN];
+    memcpy(link, "ton://transfer/", sizeof("ton://transfer/") - 1);
+    ton_tx_format_address(&s_own_address.addr, false, s_own_address.testnet,
+                          link + sizeof("ton://transfer/") - 1);
+    if (!qrcodegen_encodeText(link, tmp, qr, qrcodegen_Ecc_LOW, qrcodegen_VERSION_MIN, QR_MAX_VERSION,
+                              qrcodegen_Mask_AUTO, true)) {
+        display_text_centered(80, FONT_M, COLOR_RED, "QR code failed");
+        return;
+    }
+    const int size = qrcodegen_getSize(qr);
+    const int area = DISPLAY_FOOTER_Y - DISPLAY_HEADER_H;
+    const int scale = area / (size + 8);
+    const int side = (size + 8) * scale;
+    const int x0 = (DISPLAY_W - side) / 2;
+    const int y0 = DISPLAY_HEADER_H + (area - side) / 2;
+    /* qrcodegen's own buffer is not a plain bitmap (its first byte is the
+     * size), so the modules are copied out into one. */
+    static uint8_t bits[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION)];
+    memset(bits, 0, sizeof(bits));
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            if (qrcodegen_getModule(qr, x, y)) {
+                const int i = y * size + x;
+                bits[i / 8] |= (uint8_t)(1u << (i % 8));
+            }
+        }
+    }
+    display_fill(x0, y0, side, side, COLOR_WHITE);
+    display_bits(x0 + 4 * scale, y0 + 4 * scale, size, scale, COLOR_BLACK, bits);
+}
+
 static void draw_own_address_page(void)
 {
     display_lock();
     display_clear();
     display_header("Your address", COLOR_ACCENT);
-    draw_address(44, &s_own_address.addr, false, s_own_address.testnet);
-    display_text_centered(110, FONT_S, COLOR_GRAY, "Compare it with the app");
-    display_footer("Press = done", false, s_own_address.testnet);
+    if (s_own_address.qr_page) {
+        draw_own_address_qr();
+        display_footer("Press = done", false, s_own_address.testnet);
+    } else {
+        draw_address(44, &s_own_address.addr, false, s_own_address.testnet);
+        display_text_centered(110, FONT_S, COLOR_GRAY, "Compare it with the app");
+        display_footer("Press = QR code", false, s_own_address.testnet);
+    }
     display_flush();
     display_unlock();
 }
@@ -1422,6 +1471,9 @@ void gatt_svc_on_confirm_button(bool long_press)
         seed_last_activity_us = esp_timer_get_time();
         enum wallet_status status = seed_press_locked(long_press);
         UNLOCK();
+        if (status == WALLET_STATUS_SEED_CHECKED) {
+            wallet_key_mark_seed_checked();
+        }
         /* SEED_SHOWING / SEED_CHECKING are BLE notifies only — the display
          * was painted above. */
         gatt_svc_set_status(status);
@@ -1442,6 +1494,14 @@ void gatt_svc_on_confirm_button(bool long_press)
     /* A request longer than one page is read a press at a time, and each
      * page gets a confirm window of its own. Only a press on the last page
      * falls through to signing. */
+    if (op == PENDING_SHOW_ADDRESS && !pending_expired() && !s_own_address.qr_page) {
+        s_own_address.qr_page = true;
+        s_pending_since_us = esp_timer_get_time();
+        UNLOCK();
+        gatt_svc_set_status(WALLET_STATUS_ADDRESS_SHOWING);
+        return;
+    }
+
     if (op == PENDING_SIGN && !pending_expired() && s_tx_page + 1 < s_tx_page_count) {
         s_tx_page++;
         s_pending_since_us = esp_timer_get_time();
@@ -1660,7 +1720,7 @@ static void timeout_check_cb(void *arg)
          * put up within a few seconds of, say, "PIN Unlocked" used to be
          * wiped by this revert (seen on the board 2026-09-29). */
         if (display_frame_seq() == s_display_revert_frame) {
-            display_show_status(COLOR_ACCENT, "Quick Wallet", "Ready", NULL);
+            draw_ready();
         }
     }
 }
@@ -1671,6 +1731,14 @@ bool gatt_svc_confirm_pending(void)
     bool pending = s_pending != PENDING_NONE || seed_showing;
     UNLOCK();
     return pending;
+}
+
+bool gatt_svc_at_rest(void)
+{
+    LOCK();
+    bool rest = s_pending == PENDING_NONE && !s_creating && !seed_showing;
+    UNLOCK();
+    return rest;
 }
 
 bool gatt_svc_arm_if_idle(bool (*arm)(void *ctx), void *ctx)
@@ -1704,7 +1772,7 @@ void gatt_svc_on_disconnect(void)
         clear_pending();
         /* The confirm prompt is still on screen; without this it stays
          * there, looking armed, until the next status is drawn. */
-        display_show_status(COLOR_ACCENT, "Quick Wallet", "Ready", NULL);
+        draw_ready();
     }
     UNLOCK();
 }
@@ -1712,6 +1780,14 @@ void gatt_svc_on_disconnect(void)
 uint16_t gatt_svc_ota_status_handle(void)
 {
     return ota_status_chr_val_handle;
+}
+
+/* The screen at rest with a wallet: "Ready", and a reminder while the
+ * backup phrase has not been checked yet. */
+static void draw_ready(void)
+{
+    display_show_status(COLOR_ACCENT, "Quick Wallet", "Ready",
+                        wallet_key_seed_unchecked() ? "Backup not checked" : NULL);
 }
 
 /* Mirrors a status onto the display (no-op on boards without one — see
@@ -1853,9 +1929,10 @@ static void show_status_on_display(enum wallet_status status)
         }
         UNLOCK();
         break;
+    case WALLET_STATUS_SEED_UNCHECKED:
     case WALLET_STATUS_IDLE:
     default:
-        display_show_status(COLOR_ACCENT, "Quick Wallet", "Ready", NULL);
+        draw_ready();
         break;
     }
 
@@ -1866,6 +1943,7 @@ static void show_status_on_display(enum wallet_status status)
     switch (status) {
     case WALLET_STATUS_IDLE:
     case WALLET_STATUS_NO_WALLET:
+    case WALLET_STATUS_SEED_UNCHECKED:
     case WALLET_STATUS_AWAITING_CONFIRM:
     case WALLET_STATUS_CREATE_AWAITING_CONFIRM:
     case WALLET_STATUS_SEED_AWAITING_CONFIRM:
@@ -1888,6 +1966,15 @@ static void show_status_on_display(enum wallet_status status)
     }
 }
 
+void gatt_svc_show_notice(uint16_t color, const char *title, const char *line1, const char *line2,
+                          int64_t for_us)
+{
+    display_show_status(color, title, line1, line2);
+    s_display_revert_pending = true;
+    s_display_revert_at_us = esp_timer_get_time() + for_us;
+    s_display_revert_frame = display_frame_seq();
+}
+
 void gatt_svc_set_status(enum wallet_status status)
 {
     status_val = (uint8_t)status;
@@ -1898,6 +1985,28 @@ void gatt_svc_set_status(enum wallet_status status)
             ble_gattc_notify_custom(g_conn_handle, status_chr_val_handle, om);
         }
     }
+}
+
+/* What the device is waiting for when nothing is underway. */
+static enum wallet_status resting_status(void)
+{
+    if (!pin_auth_is_set()) {
+        return WALLET_STATUS_PIN_NOT_SET;
+    }
+    if (!wallet_key_exists()) {
+        return WALLET_STATUS_NO_WALLET;
+    }
+    if (wallet_key_seed_unchecked()) {
+        return WALLET_STATUS_SEED_UNCHECKED;
+    }
+    return WALLET_STATUS_IDLE;
+}
+
+void gatt_svc_on_connect(void)
+{
+    /* Value only: no notify (the central reads it), and the screen is left
+     * as it is — the phrase may still be up for someone copying it. */
+    status_val = resting_status();
 }
 
 void gatt_svc_init(void)
@@ -1918,11 +2027,7 @@ void gatt_svc_init(void)
 
     ota_service_init();
 
-    if (!pin_auth_is_set()) {
-        status_val = WALLET_STATUS_PIN_NOT_SET;
-    } else if (!wallet_key_exists()) {
-        status_val = WALLET_STATUS_NO_WALLET;
-    }
+    status_val = resting_status();
     /* Always paint the real state over main.c's generic "Starting..."
      * splash — otherwise a device that already has a wallet (the common
      * case after any reboot) shows a screen that never updates until the

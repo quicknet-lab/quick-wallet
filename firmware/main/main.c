@@ -50,11 +50,50 @@ static const char *DEVICE_NAME = "QuickWallet";
  * retry is a normal first-time pairing, not another repeat-pairing event. */
 #define REPEAT_PAIRING_CONFIRM_TIMEOUT_US (30 * 1000 * 1000)
 
+/* A new central can pair only within this long after a press of the
+ * button at rest (or the press that allows a repeat pairing): outside it,
+ * a pairing attempt is dropped before any passkey is drawn. Bonded centrals
+ * reconnect without it. One pairing per press. */
+#define PAIRING_WINDOW_US (60 * 1000 * 1000LL)
+
+/* A connection must be encrypted with an authenticated 128-bit key (a
+ * bonded central, or a pairing just made) within this long, or it is
+ * dropped: otherwise anyone in range could hold the only connection slot
+ * and keep the owner out. A passkey on the screen extends it to
+ * PAIRING_ENTRY_US, the time to type the code in. */
+#define UNSECURED_CONN_US (15 * 1000 * 1000LL)
+#define PAIRING_ENTRY_US (60 * 1000 * 1000LL)
+
 /* How long after boot the logo splash stays up at least (display.c). */
 #define SPLASH_MIN_US (1500 * 1000)
 static bool s_repeat_pairing_pending;
 static int64_t s_repeat_pairing_pending_since_us;
 static ble_addr_t s_repeat_pairing_peer_addr;
+
+/* Written by the NimBLE host task and the button task, read by the
+ * security timer; each is one word, and a race costs at most one second
+ * either way. */
+static volatile int64_t s_pairing_open_until_us;
+static volatile int64_t s_conn_deadline_us; /* 0: none (no connection, or secured) */
+static volatile bool s_conn_paired;         /* a passkey was shown on this connection */
+
+static void open_pairing_window(void)
+{
+    s_pairing_open_until_us = esp_timer_get_time() + PAIRING_WINDOW_US;
+    ESP_LOGI(TAG, "pairing window open for %d s", (int)(PAIRING_WINDOW_US / 1000000));
+}
+
+/* Once a second: drops a connection that has not been secured in time. */
+static void security_check_cb(void *arg)
+{
+    int64_t deadline = s_conn_deadline_us;
+    uint16_t conn = g_conn_handle;
+    if (deadline != 0 && conn != BLE_HS_CONN_HANDLE_NONE && esp_timer_get_time() > deadline) {
+        s_conn_deadline_us = 0;
+        ESP_LOGW(TAG, "connection not secured in time — dropped");
+        ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+    }
+}
 
 /* Returns whether advertising is running. */
 static bool ble_advertise(void)
@@ -121,6 +160,9 @@ int gap_event_cb(struct ble_gap_event *event, void *arg)
                  event->connect.status);
         if (event->connect.status == 0) {
             g_conn_handle = event->connect.conn_handle;
+            s_conn_paired = false;
+            s_conn_deadline_us = esp_timer_get_time() + UNSECURED_CONN_US;
+            gatt_svc_on_connect();
             request_fast_interval(event->connect.conn_handle);
         } else {
             ble_advertise();
@@ -130,6 +172,7 @@ int gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "disconnected, reason=%d", event->disconnect.reason);
         g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        s_conn_deadline_us = 0;
         pin_auth_session_reset();
         gatt_svc_on_disconnect();
         ota_service_on_disconnect();
@@ -157,10 +200,31 @@ int gap_event_cb(struct ble_gap_event *event, void *arg)
          * failed to. Characteristics flagged _ENC/_AUTHEN refuse access
          * until this fires successfully. */
         ESP_LOGI(TAG, "encryption change; status=%d", event->enc_change.status);
+        if (event->enc_change.status == 0) {
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0
+                && desc.sec_state.encrypted && desc.sec_state.authenticated
+                && desc.sec_state.key_size == 16) {
+                s_conn_deadline_us = 0;
+                if (s_conn_paired) {
+                    s_pairing_open_until_us = 0;
+                }
+            }
+        }
         return 0;
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
         if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
+            if (esp_timer_get_time() > s_pairing_open_until_us) {
+                ESP_LOGW(TAG, "pairing attempt outside the pairing window — dropped");
+                gatt_svc_show_notice(COLOR_ORANGE, "Pairing", "Press the button,", "then pair again",
+                                     10 * 1000 * 1000LL);
+                ble_gap_terminate(event->passkey.conn_handle, BLE_ERR_AUTH_FAIL);
+                return 0;
+            }
+            s_conn_paired = true;
+            s_conn_deadline_us = esp_timer_get_time() + PAIRING_ENTRY_US;
+
             /* NimBLE passkeys are always exactly 6 digits, 000000-999999.
              * Rejection sampling rather than a bare % 1000000: 4,294,000,000
              * is the largest multiple of 10^6 below 2^32, so drawing below
@@ -275,7 +339,8 @@ static void on_reset(int reason)
 /* A single physical button serves three independent confirm flows (tx
  * signing, OTA start, repeat-pairing bond removal) — each callee no-ops
  * unless it has something of its own awaiting confirmation, so a stray
- * press only ever does one thing.
+ * press only ever does one thing. A press with none of them waiting opens
+ * the pairing window (PAIRING_WINDOW_US).
  *
  * A press means whatever the screen is asking about right now. Anything
  * armed by an authenticated, PIN-unlocked central (a signature, an OTA)
@@ -296,6 +361,7 @@ static void on_confirm_button(bool long_press, void *arg)
     if (repeat_pending && !gatt_svc_confirm_pending() && !ota_service_in_progress()) {
         if (esp_timer_get_time() - s_repeat_pairing_pending_since_us <= REPEAT_PAIRING_CONFIRM_TIMEOUT_US) {
             ble_store_util_delete_peer(&s_repeat_pairing_peer_addr);
+            open_pairing_window();
             ESP_LOGI(TAG, "repeat-pairing confirmed — stale bond removed, central may re-pair now");
             display_show_status(COLOR_GREEN, "Re-pair", "Allowed,", "pair again");
             return;
@@ -303,6 +369,16 @@ static void on_confirm_button(bool long_press, void *arg)
         ESP_LOGW(TAG, "repeat-pairing window expired — press handled as an ordinary one");
     } else if (repeat_pending) {
         ESP_LOGW(TAG, "repeat-pairing request superseded by an armed operation — dropped");
+    }
+
+    /* A press with nothing to confirm opens the pairing window. Taken
+     * here, not passed on: an operation armed in the meantime waits for a
+     * press of its own. */
+    if (gatt_svc_at_rest() && !ota_service_in_progress()) {
+        open_pairing_window();
+        gatt_svc_show_notice(COLOR_ACCENT, "Pairing", "Open for 60 s", "pair the new device now",
+                             PAIRING_WINDOW_US);
+        return;
     }
 
     gatt_svc_on_confirm_button(long_press);
@@ -363,6 +439,14 @@ void app_main(void)
     ble_svc_gap_device_name_set(DEVICE_NAME);
 
     confirm_button_init(CONFIRM_BUTTON_GPIO, on_confirm_button, NULL);
+
+    const esp_timer_create_args_t security_timer_args = {
+        .callback = security_check_cb,
+        .name = "ble_security",
+    };
+    esp_timer_handle_t security_timer;
+    ESP_ERROR_CHECK(esp_timer_create(&security_timer_args, &security_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(security_timer, 1000 * 1000));
 
     nimble_port_freertos_init(nimble_host_task);
 

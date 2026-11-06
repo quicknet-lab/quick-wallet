@@ -56,7 +56,7 @@ const CHAIN_ID: Record<Network, CHAIN> = { mainnet: CHAIN.MAINNET, testnet: CHAI
 export const DEVICE_INFO: DeviceInfo = {
   platform: 'browser',
   appName: 'quickwallet',
-  appVersion: '1.1.0',
+  appVersion: '1.2.0',
   maxProtocolVersion: 2,
   features: ['SendTransaction', { name: 'SendTransaction', maxMessages: MAX_MESSAGES }],
 };

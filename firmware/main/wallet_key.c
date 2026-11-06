@@ -21,6 +21,9 @@ static const char *TAG = "wallet_key";
 #define NVS_NAMESPACE "wallet"
 #define NVS_KEY_SEALED "sealed"
 #define NVS_KEY_EXISTS "exists"
+/* Set when a wallet is created, erased once its owner has passed the
+ * backup-phrase check (see wallet_key_seed_unchecked). Not a secret. */
+#define NVS_KEY_SEED_UNCHECKED "seed_unchk"
 
 /* What is sealed: a flag saying whether it holds a wallet at all (a PIN is
  * set, and sealed, before there is one), then the keys and the mnemonic.
@@ -41,6 +44,7 @@ static hmac_key_id_t s_hmac_key;
 static bool s_hmac_ok;
 static bool s_pin_set;
 static bool s_exists;
+static bool s_seed_unchecked;
 
 /* Guards everything below: the NimBLE host task (unlock, lock on
  * disconnect), the confirm-button task (set/change PIN, sign) and the
@@ -198,8 +202,17 @@ esp_err_t wallet_key_init(void)
         ESP_ERROR_CHECK(err);
     }
     s_exists = exists != 0;
+    /* A wallet created before this flag existed has none: it counts as
+     * checked, so a board already in use is not sent back to the check. */
+    uint8_t unchecked = 0;
+    err = nvs_get_u8(s_nvs, NVS_KEY_SEED_UNCHECKED, &unchecked);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_ERROR_CHECK(err);
+    }
+    s_seed_unchecked = unchecked != 0;
 
-    ESP_LOGI(TAG, "pin_set=%d wallet=%d (locked)", s_pin_set, s_exists);
+    ESP_LOGI(TAG, "pin_set=%d wallet=%d seed_unchecked=%d (locked)", s_pin_set, s_exists,
+             s_exists && s_seed_unchecked);
     return ESP_OK;
 }
 
@@ -211,6 +224,23 @@ bool wallet_key_pin_set(void)
 bool wallet_key_exists(void)
 {
     return s_exists;
+}
+
+bool wallet_key_seed_unchecked(void)
+{
+    return s_exists && s_seed_unchecked;
+}
+
+void wallet_key_mark_seed_checked(void)
+{
+    esp_err_t err = nvs_erase_key(s_nvs, NVS_KEY_SEED_UNCHECKED);
+    if ((err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND) && nvs_commit(s_nvs) == ESP_OK) {
+        s_seed_unchecked = false;
+    } else {
+        /* Kept set: the owner is asked to check again next time, the safe
+         * side of a storage error. */
+        ESP_LOGE(TAG, "clearing the seed-check flag failed");
+    }
 }
 
 /* Seals secret under kek (fresh nonce, salt as given) and commits it, along
@@ -360,6 +390,16 @@ wallet_key_result_t wallet_key_create(void)
         return WALLET_KEY_REFUSED;
     }
 
+    /* The flag goes down before the wallet does: a wallet without it would
+     * skip the backup check for good, a flag without a wallet is harmless
+     * (only read while one exists, rewritten by the next creation). */
+    if (nvs_set_u8(s_nvs, NVS_KEY_SEED_UNCHECKED, 1) != ESP_OK || nvs_commit(s_nvs) != ESP_OK) {
+        ESP_LOGE(TAG, "storing the seed-check flag failed");
+        wipe(kek, sizeof(kek));
+        return WALLET_KEY_FAILED;
+    }
+    s_seed_unchecked = true;
+
     wallet_secret_t fresh = { .has_wallet = 1 };
     ton_mnemonic_generate(fresh.mnemonic);
     uint8_t seed[TON_MNEMONIC_SEED_LEN];
@@ -391,6 +431,7 @@ void wallet_key_wipe(void)
     wallet_key_lock();
     s_pin_set = false;
     s_exists = false;
+    s_seed_unchecked = false;
     ESP_LOGW(TAG, "sealed wallet and PIN erased (factory reset)");
 }
 

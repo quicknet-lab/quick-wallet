@@ -38,8 +38,10 @@ install.
   Secure Boot and Flash Encryption for good: the board runs only firmware
   signed by the project, and its memory cannot be read over USB. Updates are
   signed too, and the app checks every one before it is installed.
-- **Pairing is protected.** Bluetooth pairing uses a six-digit code shown on
-  the board's screen.
+- **Pairing is protected.** A new phone or computer can pair only within a
+  minute after the board's button is pressed, with a six-digit code shown on
+  its screen, and only with LE Secure Connections. A connection that is not
+  secured by a pairing is dropped within seconds.
 
 ## What it can do
 
@@ -67,7 +69,8 @@ install.
    press **Install firmware over USB**, then confirm. The first start locks
    the board and takes up to a minute — keep the cable plugged in until the
    screen lights up.
-2. Press **Connect to device** and enter the pairing code shown on the board.
+2. Press the button on the board, then **Connect to device** and enter the
+   pairing code shown on the board.
 3. Set a PIN, then create the wallet and confirm on the board.
 4. Write down the 24 words shown on the board and answer the check questions.
 

@@ -99,7 +99,8 @@
  * random position and offers five words, one of them right. A short press highlights the next one, a long press picks it.
  * Answered entirely on the device — only the outcome goes over BLE
  * (WALLET_STATUS_SEED_CHECKED / _CHECK_FAILED), never a word or a
- * position. The app asks for this once, right after creating the wallet. */
+ * position. The app asks for this right after creating the wallet, and
+ * again on every connection until the first pass (WALLET_STATUS_SEED_UNCHECKED). */
 #define GATT_SHOW_SEED_OP_START_CHECK 0x02
 
 /* Read-only: the running firmware's version string from esp_app_desc_t
@@ -278,10 +279,26 @@ enum wallet_status {
      * PIN_AUTH_SESSION_IDLE_US and locked itself. The connection stays up;
      * the client asks for the PIN again (GATT_PIN_OP_VERIFY). */
     WALLET_STATUS_SESSION_LOCKED = 39,
+    /* A resting state like NO_WALLET, read on connecting, never notified: a
+     * wallet exists but its backup-phrase check (GATT_SHOW_SEED_OP_START_CHECK)
+     * has not been passed yet. Survives restarts and disconnects until the
+     * first SEED_CHECKED, so a check cut short by a lost connection or power
+     * is asked for again. The device still signs as usual; holding the
+     * client back from the wallet until the check is passed is the client's
+     * job. */
+    WALLET_STATUS_SEED_UNCHECKED = 40,
 };
 
 void gatt_svc_init(void);
+/* A central connected: the status it reads is the resting state, not the
+ * last result of the previous connection. */
+void gatt_svc_on_connect(void);
 void gatt_svc_set_status(enum wallet_status status);
+/* A status screen of main.c's own (not a wallet status): drawn now, and
+ * replaced by the resting screen after for_us unless something else has been
+ * drawn by then. */
+void gatt_svc_show_notice(uint16_t color, const char *title, const char *line1, const char *line2,
+                          int64_t for_us);
 
 /* Called from the confirm button's task when it's pressed. Signs the
  * pending tx (if any, and still within the confirm window) and pushes a
@@ -297,6 +314,9 @@ void gatt_svc_on_confirm_button(bool long_press);
  * press would be ambiguous, and internally to refuse arming a second
  * operation on top of a first. */
 bool gatt_svc_confirm_pending(void);
+/* Nothing of the wallet's is underway: no operation waiting for the
+ * button, no key being generated, no seed phrase on screen. */
+bool gatt_svc_at_rest(void);
 
 /* Calls arm() under this module's lock, and only if gatt_svc_confirm_pending()
  * would be false; returns arm()'s result, or false without calling it.
