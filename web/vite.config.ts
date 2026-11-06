@@ -1,4 +1,4 @@
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { nodePolyfills } from 'vite-plugin-node-polyfills';
 
 // @ton/core reaches for Node's Buffer at module init time; this plugin
@@ -22,7 +22,26 @@ function toncenterProxy(env: Record<string, string>) {
   };
 }
 
+/** Dev-server stand-in for functions/api/tc-manifest (no size or type checks). */
+const tcManifestProxy: Plugin = {
+  name: 'tc-manifest-proxy',
+  configureServer(server) {
+    server.middlewares.use('/api/tc-manifest', async (req, res) => {
+      const target = new URL(req.url ?? '', 'http://dev').searchParams.get('url') ?? '';
+      try {
+        const upstream = await fetch(target);
+        res.statusCode = upstream.status;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(Buffer.from(await upstream.arrayBuffer()));
+      } catch {
+        res.statusCode = 504;
+        res.end();
+      }
+    });
+  },
+};
+
 export default defineConfig(({ mode }) => ({
-  plugins: [nodePolyfills({ include: ['buffer'] })],
+  plugins: [nodePolyfills({ include: ['buffer'] }), tcManifestProxy],
   server: { proxy: toncenterProxy(loadEnv(mode, process.cwd(), 'TONCENTER_')) },
 }));

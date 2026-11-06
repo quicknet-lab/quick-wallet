@@ -33,6 +33,8 @@ import type { OutMessage } from './wallet';
 
 /** The bridge Tonkeeper runs, which most sites and wallets use. */
 export const BRIDGE_URL = 'https://bridge.tonapi.io/bridge';
+/** Same-origin fetch of a site's manifest (functions/api/tc-manifest.ts). */
+const MANIFEST_PROXY = '/api/tc-manifest';
 /** Hosts of the universal links of wallets on that bridge (Tonkeeper and
  * Tonkeeper Pro in ton-connect/wallets-list, checked 2026-09-28). */
 const TONKEEPER_BRIDGE_LINK_HOSTS = ['app.tonkeeper.com'];
@@ -150,15 +152,23 @@ export async function fetchManifest(manifestUrl: string): Promise<AppManifest> {
   } catch {
     throw new TonConnectError(ERROR.MANIFEST_NOT_FOUND, 'Could not load the site\'s TON Connect manifest.');
   }
+  // Through the site's own proxy (functions/api/tc-manifest.ts): the CSP lets
+  // the page talk to no arbitrary host, and manifests served without CORS
+  // headers (app.ston.fi) load too, as they do for native wallets.
   let res: Response;
   try {
-    res = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer' });
+    res = await fetch(`${MANIFEST_PROXY}?url=${encodeURIComponent(url.toString())}`, { credentials: 'omit' });
   } catch {
-    // The browser withheld the response — in practice a manifest served
-    // without CORS headers (app.ston.fi), which native wallets never notice.
-    // Its address came in the same link, from the same site, as its content
-    // would have, so naming the site by that host trusts nothing new.
+    res = new Response(null, { status: 504 });
+  }
+  if (res.status === 504) {
+    // The manifest's host could not be reached. Its address came in the same
+    // link, from the same site, as its content would have, so naming the site
+    // by that host trusts nothing new.
     return { name: url.host, url: url.origin, domain: url.host, fromLink: true };
+  }
+  if (res.status === 413 || res.status === 422) {
+    throw new TonConnectError(ERROR.MANIFEST_CONTENT, 'The site\'s manifest is not valid.');
   }
   if (!res.ok) {
     throw new TonConnectError(ERROR.MANIFEST_NOT_FOUND, `The site's manifest is unavailable (${res.status}).`);

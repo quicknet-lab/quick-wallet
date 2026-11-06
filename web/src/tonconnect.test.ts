@@ -128,14 +128,38 @@ describe('listen', () => {
 describe('fetchManifest', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('names the site by the manifest\'s host when the browser withholds it (CORS)', async () => {
-    vi.stubGlobal('fetch', () => Promise.reject(new TypeError('Failed to fetch')));
+  it('fetches through the same-origin proxy', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', (u: string) => {
+      calls.push(u);
+      return Promise.resolve(new Response(JSON.stringify({ name: 'STON.fi', url: 'https://app.ston.fi' })));
+    });
     await expect(fetchManifest('https://app.ston.fi/tonconnect-manifest.json')).resolves.toEqual({
+      name: 'STON.fi',
+      url: 'https://app.ston.fi',
+      domain: 'app.ston.fi',
+    });
+    expect(calls).toEqual(['/api/tc-manifest?url=https%3A%2F%2Fapp.ston.fi%2Ftonconnect-manifest.json']);
+  });
+
+  it('names the site by the manifest\'s host when that host is unreachable', async () => {
+    const fromLink = {
       name: 'app.ston.fi',
       url: 'https://app.ston.fi',
       domain: 'app.ston.fi',
       fromLink: true,
-    });
+    };
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(null, { status: 504 })));
+    await expect(fetchManifest('https://app.ston.fi/tonconnect-manifest.json')).resolves.toEqual(fromLink);
+    vi.stubGlobal('fetch', () => Promise.reject(new TypeError('Failed to fetch')));
+    await expect(fetchManifest('https://app.ston.fi/tonconnect-manifest.json')).resolves.toEqual(fromLink);
+  });
+
+  it('refuses a manifest the proxy found too big or not JSON', async () => {
+    for (const status of [413, 422]) {
+      vi.stubGlobal('fetch', () => Promise.resolve(new Response(null, { status })));
+      await expect(fetchManifest('https://example.com/m.json')).rejects.toThrow(/not valid/);
+    }
   });
 
   it('still refuses a missing manifest and a non-https one', async () => {

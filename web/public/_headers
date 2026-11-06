@@ -2,17 +2,17 @@
 #
 # This page decides what the hardware wallet is asked to sign, so the
 # Content-Security-Policy is damage control rather than hygiene: injected markup
-# can't run script, load code from anywhere else, or frame the app. connect-src
-# stays open to https: for TON Connect: the tonconnect-manifest.json of whatever
-# site the user connects to can be hosted anywhere. It carries only what a site
-# already sees; signing still goes through the device. Token and NFT images only
+# can't run script, load code from anywhere else, frame the app, or send data to
+# a host of its choosing. A TON Connect site's manifest can be hosted anywhere,
+# so it comes through the same-origin functions/api/tc-manifest.ts, not straight
+# from its host. Token and NFT images only
 # ever come through toncenter's proxy (tokens.ts). The dev server has no such
 # policy: its hot reload depends on exactly what the policy forbids.
 #
 # No Cross-Origin-Embedder-Policy: those images come from another origin that
 # sends no Cross-Origin-Resource-Policy.
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: https://proxy.toncenter.com; connect-src 'self' wss://omni-ws.ston.fi https://bridge.tonapi.io https:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: https://proxy.toncenter.com; connect-src 'self' https://api.ston.fi wss://omni-ws.ston.fi https://bridge.tonapi.io; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
   X-Frame-Options: DENY
   Permissions-Policy: bluetooth=(self), serial=(self), camera=(), microphone=(), geolocation=(), usb=(), payment=()
   X-Content-Type-Options: nosniff
