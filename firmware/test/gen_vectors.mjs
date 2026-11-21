@@ -7,8 +7,8 @@ import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(new URL('../../web/package.json', import.meta.url));
-const { Address, BitString, Cell, Dictionary, beginCell, internal, toNano, SendMode, WalletContractV5R1, storeMessageRelaxed } =
-  require('@ton/ton');
+const { Address, BitString, Cell, Dictionary, beginCell, internal, toNano, SendMode, WalletContractV5R1, storeMessageRelaxed,
+  storeCommonMessageInfoRelaxed } = require('@ton/ton');
 
 const pubkey = Buffer.alloc(32, 7);
 const wallet = (networkGlobalId) =>
@@ -42,15 +42,17 @@ async function signingCell(w, messages, { sendMode = APP_MODE, extraActions = []
   return captured;
 }
 
-const jettonBody = (amount, to, comment) => {
+// response_destination and forward_ton_amount default to a stranger and 1
+// nanoTON: ton_tx_check_owner() refuses those, the parser only reports them.
+const jettonBody = (amount, to, comment, { response = addr('dd'), forward = 1n } = {}) => {
   const b = beginCell()
     .storeUint(0x0f8a7ea5, 32)
     .storeUint(0, 64)
     .storeCoins(amount)
     .storeAddress(to)
-    .storeAddress(addr('dd'))
+    .storeAddress(response)
     .storeBit(0)
-    .storeCoins(1n);
+    .storeCoins(forward);
   if (comment) b.storeBit(1).storeRef(beginCell().storeUint(0, 32).storeStringTail(comment).endCell());
   else b.storeBit(0);
   return b.endCell();
@@ -91,11 +93,41 @@ const cases = [
     to: addr('bb'), value: toNano('0.05'), bounce: true, body: jettonBody(100_500_000n, addr('aa'), 'memo 42'),
   }]), {
     testnet: false,
-    msgs: [{ kind: 'JETTON', ton: toNano('0.05'), dest: addr('bb'), bounce: true, tokenAmount: 100_500_000n, to: addr('aa'), comment: 'memo 42' }],
+    ownerErr: 'RESPONSE',
+    msgs: [{ kind: 'JETTON', ton: toNano('0.05'), dest: addr('bb'), bounce: true, tokenAmount: 100_500_000n, to: addr('aa'), comment: 'memo 42',
+      forward: 1n, response: addr('dd') }],
+  }],
+  // A drain dressed as a payment: "1 USDT" plus 300 TON of "gas",
+  // nearly all of it forwarded to the recipient. Parsed as such; the
+  // leftover comes back to the wallet itself, so the owner check passes.
+  ['jetton_big_forward_own_response', await signingCell(mainnet, [{
+    to: addr('bb'), value: toNano('300'), bounce: true,
+    body: jettonBody(1_000_000n, addr('ab'), undefined, { response: mainnet.address, forward: toNano('299.9') }),
+  }]), {
+    testnet: false,
+    msgs: [{ kind: 'JETTON', ton: toNano('300'), dest: addr('bb'), bounce: true, tokenAmount: 1_000_000n, to: addr('ab'),
+      forward: toNano('299.9'), response: mainnet.address }],
+  }],
+  ['jetton_no_response', await signingCell(mainnet, [{
+    to: addr('bb'), value: toNano('0.05'), bounce: true, body: jettonBody(5n, addr('ab'), undefined, { response: null }),
+  }]), {
+    testnet: false,
+    msgs: [{ kind: 'JETTON', ton: toNano('0.05'), dest: addr('bb'), bounce: true, tokenAmount: 5n, to: addr('ab'), forward: 1n }],
+  }],
+  // The wallet's own hash, but in the masterchain: someone else's account.
+  ['jetton_response_masterchain', await signingCell(mainnet, [{
+    to: addr('bb'), value: toNano('0.05'), bounce: true,
+    body: jettonBody(5n, addr('ab'), undefined, { response: new Address(-1, mainnet.address.hash) }),
+  }]), {
+    testnet: false,
+    ownerErr: 'RESPONSE',
+    msgs: [{ kind: 'JETTON', ton: toNano('0.05'), dest: addr('bb'), bounce: true, tokenAmount: 5n, to: addr('ab'), forward: 1n,
+      response: new Address(-1, mainnet.address.hash) }],
   }],
   ['nft', await signingCell(mainnet, [{ to: addr('bb'), value: toNano('0.05'), bounce: true, body: nftBody(addr('aa', -1)) }]), {
     testnet: false,
-    msgs: [{ kind: 'NFT', ton: toNano('0.05'), dest: addr('bb'), bounce: true, to: addr('aa', -1) }],
+    ownerErr: 'RESPONSE',
+    msgs: [{ kind: 'NFT', ton: toNano('0.05'), dest: addr('bb'), bounce: true, to: addr('aa', -1), forward: 1n, response: addr('dd') }],
   }],
   ['call_with_init_multi', await signingCell(mainnet, [
     { to: addr('aa'), value: toNano('10.25'), bounce: true, body: beginCell().storeUint(0xea06185d, 32).storeUint(9, 64).endCell() },
@@ -103,9 +135,11 @@ const cases = [
     { to: addr('ee'), value: 2n, bounce: false, body: beginCell().storeUint(3, 5).endCell() },
   ]), {
     testnet: false,
+    ownerErr: 'RESPONSE',
     msgs: [
       { kind: 'CALL', ton: toNano('10.25'), dest: addr('aa'), bounce: true, op: 0xea06185d },
-      { kind: 'JETTON', ton: toNano('0.3'), dest: addr('cc'), bounce: true, deploys: true, tokenAmount: 7n, to: addr('ee') },
+      { kind: 'JETTON', ton: toNano('0.3'), dest: addr('cc'), bounce: true, deploys: true, tokenAmount: 7n, to: addr('ee'),
+        forward: 1n, response: addr('dd') },
       { kind: 'CALL', ton: 2n, dest: addr('ee'), bounce: false },
     ],
   }],
@@ -144,6 +178,18 @@ cases.push(
     .storeBit(0).endCell(), { err: 'MESSAGE' }],
 );
 
+// A library cell as a message body: nothing on screen could say what it asks.
+const libraryBody = new Cell({ exotic: true, bits: new BitString(Buffer.from('02' + '11'.repeat(32), 'hex'), 0, 264) });
+cases.push(
+  ['refuse_library_body', beginCell().storeUint(0x7369676e, 32).storeUint(0x7fffff11, 32).storeUint(0, 64)
+    .storeMaybeRef(beginCell().storeRef(beginCell().endCell()).storeUint(0x0ec3c86d, 32).storeUint(3, 8)
+      .storeRef(beginCell().store(storeCommonMessageInfoRelaxed({
+        type: 'internal', ihrDisabled: true, bounce: true, bounced: false, dest: addr('aa'),
+        value: { coins: 1n }, ihrFee: 0n, forwardFee: 0n, createdLt: 0n, createdAt: 0,
+      })).storeBit(0).storeBit(1).storeRef(libraryBody).endCell()).endCell())
+    .storeBit(0).endCell(), { err: 'MESSAGE' }],
+);
+
 // Token transfers a token contract would likely still carry out, but that
 // don't parse strictly: refused, never shown as a plain contract call.
 const addrVar = beginCell().storeUint(3, 2).storeBit(0).storeUint(256, 9).storeInt(0, 32).storeBuffer(Buffer.alloc(32, 0xdd)).endCell();
@@ -164,9 +210,12 @@ const addrInit = (a) => (a ? `{ ${a.workChain}, { ${hex(a.hash)} } }` : '{ 0, { 
 
 let out = '/* Generated by gen_vectors.mjs — do not edit. */\n#include "ton_tx.h"\n\n';
 out += 'typedef struct { const char *kind; uint8_t ton[16]; ton_tx_addr_t dest; bool bounce; bool deploys;\n';
-out += '  uint8_t token_amount[16]; ton_tx_addr_t to; const char *comment; bool has_op; uint32_t op; } expect_msg_t;\n';
-out += 'typedef struct { const char *name; const uint8_t *boc; size_t boc_len; const char *err; uint8_t hash[32];\n';
-out += '  bool testnet; size_t n_msgs; expect_msg_t msgs[4]; } vector_t;\n\n';
+out += '  uint8_t token_amount[16]; ton_tx_addr_t to; const char *comment; bool has_op; uint32_t op;\n';
+out += '  uint8_t forward_ton[16]; bool has_response; ton_tx_addr_t response; } expect_msg_t;\n';
+out += 'typedef struct { const char *name; const uint8_t *boc; size_t boc_len; const char *err; const char *owner_err;\n';
+out += '  uint8_t hash[32]; bool testnet; size_t n_msgs; expect_msg_t msgs[4]; } vector_t;\n\n';
+// ton_tx_check_owner() is checked against the wallet every vector is built for.
+out += `static const uint8_t vector_owner[32] = { ${hex(mainnet.address.hash)} };\n\n`;
 cases.forEach(([name], i) => {
   const boc = cases[i][1].toBoc({ idx: false, crc32: false });
   out += `static const uint8_t boc_${name}[] = { ${hex(boc)} };\n`;
@@ -176,9 +225,10 @@ for (const [name, cell, exp] of cases) {
   const msgs = (exp.msgs ?? []).map((m) =>
     `{ ${cstr(m.kind)}, { ${amount16(m.ton)} }, ${addrInit(m.dest)}, ${!!m.bounce}, ${!!m.deploys}, ` +
     `{ ${amount16(m.tokenAmount)} }, ${addrInit(m.to)}, ${m.comment === undefined ? 'NULL' : cstr(m.comment)}, ` +
-    `${m.op !== undefined}, ${m.op ?? 0}u }`,
+    `${m.op !== undefined}, ${m.op ?? 0}u, { ${amount16(m.forward)} }, ${!!m.response}, ${addrInit(m.response)} }`,
   );
-  out += `  { ${cstr(name)}, boc_${name}, sizeof(boc_${name}), ${exp.err ? cstr(exp.err) : 'NULL'}, { ${hex(cell.hash())} },\n`;
+  out += `  { ${cstr(name)}, boc_${name}, sizeof(boc_${name}), ${exp.err ? cstr(exp.err) : 'NULL'}, ` +
+    `${exp.ownerErr ? cstr(exp.ownerErr) : 'NULL'}, { ${hex(cell.hash())} },\n`;
   out += `    ${!!exp.testnet}, ${msgs.length}, { ${msgs.join(',\n      ')} } },\n`;
 }
 out += '};\n\n';

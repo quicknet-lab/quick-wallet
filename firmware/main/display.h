@@ -109,8 +109,9 @@ void display_show_splash(void);
  * unless color is the ordinary COLOR_ACCENT, then white — and line2 (may be
  * NULL) a smaller gray line under it. A line1 short enough, with no line2,
  * is drawn in FONT_L. The firmware version goes in the bottom-left corner.
- * Takes the display lock itself. */
-void display_show_status(uint16_t color, const char *title, const char *line1, const char *line2);
+ * Takes the display lock itself. Returns the display_frame_seq() of the
+ * frame it drew. */
+uint32_t display_show_status(uint16_t color, const char *title, const char *line1, const char *line2);
 
 /* There is one frame and several tasks draw on it (NimBLE host, confirm
  * button, timers). Anyone composing a frame out of display_clear() /

@@ -42,9 +42,11 @@ export const onRequest = async (context: {
     return new Response('Not found', { status: 404 });
   }
   // Browsers mark cross-site requests and scripts cannot forge this header:
-  // other sites can't spend the key through their visitors' browsers.
-  const site = request.headers.get('Sec-Fetch-Site');
-  if (site && site !== 'same-origin') {
+  // other sites can't spend the key through their visitors' browsers. Every
+  // browser with Web Bluetooth sends it, so a request without it is no page
+  // of this site's — a script or a crawler — and is turned away too. (A
+  // client outside a browser can still set it; only a rate limit stops that.)
+  if (request.headers.get('Sec-Fetch-Site') !== 'same-origin') {
     return new Response('Forbidden', { status: 403 });
   }
 

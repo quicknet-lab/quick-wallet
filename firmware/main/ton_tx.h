@@ -13,17 +13,21 @@
  * everything that decides where funds go: how long the request stays valid,
  * and per message how much TON leaves, the destination, whether it deploys a contract, and for the body formats
  * it knows (text comment, TEP-74 jetton transfer, TEP-62 NFT transfer) the
- * token amount and recipient. Other bodies are reported as a contract call
- * with their op code; the TON value and destination of those are still read
- * from the signed data. A body with a jetton or NFT transfer op that doesn't
- * parse as that transfer is refused rather than shown as a call.
+ * token amount and recipient, and where the TON riding along ends up. Other
+ * bodies are reported as a contract call with their op code; the TON value
+ * and destination of those are still read from the signed data. A body with
+ * a jetton or NFT transfer op that doesn't parse as that transfer is refused
+ * rather than shown as a call.
  *
  * Refused outright: anything but auth_signed_external, a wallet_id other
  * than subwallet 0 of v5r1 on mainnet or testnet, extension actions (they
  * would hand control of the wallet to another contract), actions other than
  * send_msg, send modes other than 3 (PAY_GAS_SEPARATELY | IGNORE_ERRORS —
  * the only one the app uses; 128 would send the whole balance whatever the
- * shown value), extra currencies, and any exotic cell but a library cell.
+ * shown value), extra currencies, any exotic cell but a library cell inside
+ * a StateInit, and a library cell as a message body. A token or NFT transfer
+ * that hands its leftover TON to someone else is refused too, by
+ * ton_tx_check_owner() — this module doesn't know the wallet's address.
  *
  * Not reentrant: parsing works in static buffers. Only the NimBLE host task
  * calls it. Plain C with no ESP-IDF dependency beyond mbedtls, so it also
@@ -62,6 +66,13 @@ typedef struct {
     /* JETTON: units and the new owner. NFT: the new owner. */
     uint8_t token_amount[TON_TX_AMOUNT_BYTES];
     ton_tx_addr_t to;
+    /* JETTON/NFT: where the TON value goes. The token contract passes
+     * forward_ton on to `to` along with its notification, and sends what is
+     * left after fees to `response` (has_response), or keeps it (addr_none).
+     * Both are part of `ton`, which is what leaves the wallet. */
+    uint8_t forward_ton[TON_TX_AMOUNT_BYTES];
+    bool has_response;
+    ton_tx_addr_t response;
 
     /* TRANSFER: the comment. JETTON/NFT: a text comment in the forward
      * payload. Printable ASCII; any other byte shows as '?'. */
@@ -92,9 +103,20 @@ typedef enum {
     TON_TX_ERR_ACTION,   /* no messages, or something other than a plain send */
     TON_TX_ERR_MESSAGE,  /* a message this device can't show faithfully */
     TON_TX_ERR_TOO_MANY, /* more than TON_TX_MAX_MESSAGES */
+    TON_TX_ERR_RESPONSE, /* a token transfer's leftover TON goes to someone else */
 } ton_tx_err_t;
 
 ton_tx_err_t ton_tx_parse(const uint8_t *boc, size_t len, ton_tx_t *out);
+
+/* TON_TX_ERR_RESPONSE if a jetton or NFT transfer in tx sends its leftover
+ * TON (response_destination) anywhere but addr_none or own_hash — the
+ * address of the wallet signing it, in workchain 0. That leftover is the
+ * part of the value nothing on screen would otherwise account for: a site
+ * could attach the whole balance as "gas" and collect what comes back. */
+ton_tx_err_t ton_tx_check_owner(const ton_tx_t *tx, const uint8_t own_hash[32]);
+
+/* amount > nano. */
+bool ton_tx_amount_above(const uint8_t amount[TON_TX_AMOUNT_BYTES], uint64_t nano);
 
 /* Friendly form of addr into out (TON_TX_ADDR_STR_LEN + 1 bytes). The flags
  * only change how the same address is written, never which one it is. */

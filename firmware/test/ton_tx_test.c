@@ -26,6 +26,7 @@ static const char *err_name(ton_tx_err_t err)
     case TON_TX_ERR_ACTION: return "ACTION";
     case TON_TX_ERR_MESSAGE: return "MESSAGE";
     case TON_TX_ERR_TOO_MANY: return "TOO_MANY";
+    case TON_TX_ERR_RESPONSE: return "RESPONSE";
     }
     return "?";
 }
@@ -75,6 +76,9 @@ static void check_vector(const vector_t *v)
         }
         if (m->kind == TON_TX_MSG_JETTON || m->kind == TON_TX_MSG_NFT) {
             CHECK(same_addr(&m->to, &e->to), "%s[%zu]: token recipient", v->name, i);
+            CHECK(memcmp(m->forward_ton, e->forward_ton, 16) == 0, "%s[%zu]: forwarded TON", v->name, i);
+            CHECK(m->has_response == e->has_response && (!m->has_response || same_addr(&m->response, &e->response)),
+                  "%s[%zu]: response destination", v->name, i);
         }
         if (e->comment != NULL) {
             CHECK(m->has_comment && strcmp(m->comment, e->comment) == 0, "%s[%zu]: comment \"%s\", expected \"%s\"",
@@ -84,6 +88,10 @@ static void check_vector(const vector_t *v)
         }
         CHECK(m->has_op == e->has_op && (!m->has_op || m->op == e->op), "%s[%zu]: op", v->name, i);
     }
+    const char *owner = err_name(ton_tx_check_owner(&tx, vector_owner));
+    CHECK((owner == NULL && v->owner_err == NULL)
+              || (owner != NULL && v->owner_err != NULL && strcmp(owner, v->owner_err) == 0),
+          "%s: owner check %s, expected %s", v->name, owner ? owner : "ok", v->owner_err ? v->owner_err : "ok");
 }
 
 static void check_corruption(void)
@@ -138,6 +146,31 @@ static void check_amounts(void)
     }
 }
 
+static void check_amount_above(void)
+{
+    struct {
+        uint8_t high; /* top byte: amounts past 2^64 */
+        uint64_t low;
+        uint64_t limit;
+        bool expected;
+    } cases[] = {
+        { 0, 500000000ull, 500000000ull, false },
+        { 0, 500000001ull, 500000000ull, true },
+        { 0, 0, 0, false },
+        { 0, 1, 0, true },
+        { 0, UINT64_MAX, UINT64_MAX - 1, true },
+        { 1, 0, UINT64_MAX, true },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        uint8_t amount[16] = { 0 };
+        amount[0] = cases[i].high;
+        for (int b = 0; b < 8; b++) {
+            amount[15 - b] = (uint8_t)(cases[i].low >> (8 * b));
+        }
+        CHECK(ton_tx_amount_above(amount, cases[i].limit) == cases[i].expected, "amount_above case %zu", i);
+    }
+}
+
 int main(void)
 {
     for (size_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
@@ -151,6 +184,7 @@ int main(void)
     }
     check_corruption();
     check_amounts();
+    check_amount_above();
     printf("%s (%zu transaction vectors)\n", failures ? "FAILED" : "ok", sizeof(vectors) / sizeof(vectors[0]));
     return failures ? 1 : 0;
 }

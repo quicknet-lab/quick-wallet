@@ -71,6 +71,13 @@ static uint32_t s_received;
 static const esp_partition_t *s_update_partition;
 /* The version of the validated image, for the screen while it waits. */
 static char s_incoming_version[sizeof(((esp_app_desc_t *)0)->version) + 1];
+/* The frame the screen a press would act on (OTA_STATUS_AWAITING_CONFIRM or
+ * _AWAITING_SWITCH) last went up in; s_prompt_drawn is false until it has
+ * since the state was entered. A press acts only while that frame is still
+ * on screen — anything drawn over it gets it drawn again instead, as in
+ * gatt_svc.c (s_prompt_frame there). */
+static uint32_t s_prompt_frame;
+static bool s_prompt_drawn;
 
 /* "1.2.3", optionally after a 'v' and before anything else (a "-dirty"
  * suffix). False for anything not starting like that. */
@@ -118,8 +125,9 @@ static bool version_allowed(const char *running, const char *incoming)
     return true;
 }
 
-/* Both versions and what a press does. Takes the display lock itself. */
-static void draw_switch_prompt(void)
+/* Both versions and what a press does. Takes the display lock itself.
+ * Returns the frame it drew. */
+static uint32_t draw_switch_prompt(void)
 {
     char line[48];
     display_lock();
@@ -131,14 +139,21 @@ static void draw_switch_prompt(void)
     display_text_centered(84, FONT_S, COLOR_GRAY, line);
     display_footer("Press = install", true, false);
     display_flush();
+    const uint32_t frame = display_frame_seq();
     display_unlock();
+    return frame;
 }
 
 static void show_status_on_display(enum ota_status status)
 {
+    uint32_t prompt;
     switch (status) {
     case OTA_STATUS_AWAITING_CONFIRM:
-        display_show_status(COLOR_ACCENT, "OTA Update", "Press button", "to confirm");
+        prompt = display_show_status(COLOR_ACCENT, "OTA Update", "Press button", "to confirm");
+        LOCK();
+        s_prompt_frame = prompt;
+        s_prompt_drawn = true;
+        UNLOCK();
         break;
     case OTA_STATUS_PREPARING:
     case OTA_STATUS_IN_PROGRESS:
@@ -151,7 +166,11 @@ static void show_status_on_display(enum ota_status status)
         display_show_status(COLOR_RED, "OTA Update", "Error", NULL);
         break;
     case OTA_STATUS_AWAITING_SWITCH:
-        draw_switch_prompt();
+        prompt = draw_switch_prompt();
+        LOCK();
+        s_prompt_frame = prompt;
+        s_prompt_drawn = true;
+        UNLOCK();
         break;
     case OTA_STATUS_DOWNGRADE:
         display_show_status(COLOR_RED, "OTA Update", "Older version,", "refused");
@@ -233,6 +252,7 @@ static bool arm_locked(void *ctx)
         s_state = OTA_STATE_ARMED;
         s_armed_since_us = esp_timer_get_time();
         s_update_partition = ctx;
+        s_prompt_drawn = false;
     }
     UNLOCK();
     return armed;
@@ -286,7 +306,12 @@ static void finish_task(void *arg)
     }
 
     /* esp_ota_end() has checked the signature, so this is a release — but
-     * not necessarily a newer one. */
+     * not necessarily a newer one. The secure version is what the
+     * bootloader's anti-rollback goes by: a signed image from before the
+     * last raise would be refused at boot anyway, so it is refused here,
+     * before a second press is asked for, and whatever its version string
+     * says — the numbering was restarted once, and images from before that
+     * carry higher numbers than current ones. */
     esp_app_desc_t incoming;
     err = esp_ota_get_partition_description(partition, &incoming);
     char version[sizeof(s_incoming_version)];
@@ -294,9 +319,11 @@ static void finish_task(void *arg)
         memcpy(version, incoming.version, sizeof(incoming.version));
         version[sizeof(incoming.version)] = '\0';
     }
-    if (err != ESP_OK || !version_allowed(esp_app_get_description()->version, version)) {
-        ESP_LOGE(TAG, "refusing image version \"%s\" over \"%s\"", err == ESP_OK ? version : "?",
-                 esp_app_get_description()->version);
+    if (err != ESP_OK || incoming.secure_version < esp_app_get_description()->secure_version
+        || !version_allowed(esp_app_get_description()->version, version)) {
+        ESP_LOGE(TAG, "refusing image version \"%s\" (secure version %" PRIu32 ") over \"%s\" (%" PRIu32 ")",
+                 err == ESP_OK ? version : "?", err == ESP_OK ? incoming.secure_version : 0,
+                 esp_app_get_description()->version, esp_app_get_description()->secure_version);
         LOCK();
         s_state = OTA_STATE_IDLE;
         UNLOCK();
@@ -309,6 +336,7 @@ static void finish_task(void *arg)
     memcpy(s_incoming_version, version, sizeof(s_incoming_version));
     s_state = OTA_STATE_AWAITING_SWITCH;
     s_armed_since_us = esp_timer_get_time();
+    s_prompt_drawn = false;
     UNLOCK();
     ESP_LOGI(TAG, "OTA image %s validated — awaiting second press to switch", version);
     notify_status(OTA_STATUS_AWAITING_SWITCH);
@@ -493,20 +521,36 @@ void ota_service_on_confirm_button(void *arg)
     enum ota_state state = s_state;
     bool expired = esp_timer_get_time() - s_armed_since_us > OTA_CONFIRM_TIMEOUT_US;
     const esp_partition_t *partition = s_update_partition;
+    /* A press that would go ahead while something else is drawn over the
+     * prompt only puts the prompt back (see s_prompt_frame). */
+    const bool on_screen = s_prompt_drawn && display_frame_seq() == s_prompt_frame;
     bool start = false;
     bool go = false;
+    bool redraw = false;
     if (state == OTA_STATE_AWAITING_SWITCH) {
         go = !expired && !wallet_owns_press && g_conn_handle != BLE_HS_CONN_HANDLE_NONE;
-        s_state = go ? OTA_STATE_FINISHING : OTA_STATE_IDLE;
+        redraw = go && !on_screen;
+        if (!redraw) {
+            s_state = go ? OTA_STATE_FINISHING : OTA_STATE_IDLE;
+        }
     }
     if (state == OTA_STATE_ARMED) {
         /* Either way this update stops being armed here: it is going ahead
          * under this press, or it is dropped. Nothing is left for a later
          * press to complete. */
         start = !expired && !wallet_owns_press && g_conn_handle != BLE_HS_CONN_HANDLE_NONE;
-        s_state = start ? OTA_STATE_STARTING : OTA_STATE_IDLE;
+        redraw = start && !on_screen;
+        if (!redraw) {
+            s_state = start ? OTA_STATE_STARTING : OTA_STATE_IDLE;
+        }
     }
     UNLOCK();
+
+    if (redraw) {
+        ESP_LOGW(TAG, "press while something else was on screen — the update prompt is shown again");
+        show_status_on_display(state == OTA_STATE_ARMED ? OTA_STATUS_AWAITING_CONFIRM : OTA_STATUS_AWAITING_SWITCH);
+        return;
+    }
 
     if (state == OTA_STATE_AWAITING_SWITCH) {
         if (go) {

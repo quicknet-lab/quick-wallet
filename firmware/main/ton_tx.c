@@ -274,9 +274,10 @@ static bool ld_addr_std(slice_t *s, ton_tx_addr_t *out)
     return true;
 }
 
-/* addr_none$00 or addr_std — for response_destination, which only ever
- * receives leftover gas out of a value that is itself shown. */
-static bool skip_addr_optional(slice_t *s)
+/* addr_none$00 or addr_std — for response_destination, which receives what
+ * is left of a value that is itself shown. Whose address it is gets checked
+ * by ton_tx_check_owner(). */
+static bool ld_addr_optional(slice_t *s, bool *present, ton_tx_addr_t *out)
 {
     slice_t peek = *s;
     uint64_t tag;
@@ -285,10 +286,11 @@ static bool skip_addr_optional(slice_t *s)
     }
     if (tag == 0) {
         *s = peek;
+        *present = false;
         return true;
     }
-    ton_tx_addr_t ignored;
-    return ld_addr_std(s, &ignored);
+    *present = true;
+    return ld_addr_std(s, out);
 }
 
 /* Maybe ^Cell */
@@ -365,9 +367,9 @@ static bool ld_jetton_transfer(slice_t s, ton_tx_msg_t *msg)
     return ld_uint(&s, 64, &query_id)
         && ld_coins(&s, msg->token_amount)
         && ld_addr_std(&s, &msg->to)
-        && skip_addr_optional(&s)
+        && ld_addr_optional(&s, &msg->has_response, &msg->response)
         && skip_maybe_ref(&s)
-        && ld_coins(&s, (uint8_t[TON_TX_AMOUNT_BYTES]){ 0 }) /* forward_ton_amount, within the shown value */
+        && ld_coins(&s, msg->forward_ton) /* forward_ton_amount, to `to` */
         && ld_forward_payload(&s, msg);
 }
 
@@ -376,9 +378,9 @@ static bool ld_nft_transfer(slice_t s, ton_tx_msg_t *msg)
     uint64_t query_id;
     return ld_uint(&s, 64, &query_id)
         && ld_addr_std(&s, &msg->to)
-        && skip_addr_optional(&s)
+        && ld_addr_optional(&s, &msg->has_response, &msg->response)
         && skip_maybe_ref(&s)
-        && ld_coins(&s, (uint8_t[TON_TX_AMOUNT_BYTES]){ 0 }) /* forward_amount */
+        && ld_coins(&s, msg->forward_ton) /* forward_amount, to `to` */
         && ld_forward_payload(&s, msg);
 }
 
@@ -392,8 +394,11 @@ static bool classify_body(slice_t body, ton_tx_msg_t *msg)
 {
     msg->kind = TON_TX_MSG_CALL;
     msg->has_op = false;
+    /* A library cell stands in for whatever cell it names, which is not
+     * here to be read: nothing on screen could say what such a body asks
+     * the recipient to do, and nothing a wallet sends needs one. */
     if (is_exotic(&body)) {
-        return true;
+        return false;
     }
     if (at_end(&body)) {
         msg->kind = TON_TX_MSG_TRANSFER;
@@ -581,6 +586,28 @@ ton_tx_err_t ton_tx_parse(const uint8_t *boc, size_t len, ton_tx_t *out)
     out->n_msgs = n;
     memcpy(out->hash, s_cells[0].hash, 32);
     return TON_TX_OK;
+}
+
+ton_tx_err_t ton_tx_check_owner(const ton_tx_t *tx, const uint8_t own_hash[32])
+{
+    for (size_t i = 0; i < tx->n_msgs; i++) {
+        const ton_tx_msg_t *m = &tx->msgs[i];
+        if ((m->kind == TON_TX_MSG_JETTON || m->kind == TON_TX_MSG_NFT) && m->has_response
+            && (m->response.workchain != 0 || memcmp(m->response.hash, own_hash, 32) != 0)) {
+            return TON_TX_ERR_RESPONSE;
+        }
+    }
+    return TON_TX_OK;
+}
+
+bool ton_tx_amount_above(const uint8_t amount[TON_TX_AMOUNT_BYTES], uint64_t nano)
+{
+    for (unsigned i = 0; i < TON_TX_AMOUNT_BYTES - 8; i++) {
+        if (amount[i] != 0) {
+            return true;
+        }
+    }
+    return read_be(amount + TON_TX_AMOUNT_BYTES - 8, 8) > nano;
 }
 
 /* -------------------------------------------------------------- formatting */

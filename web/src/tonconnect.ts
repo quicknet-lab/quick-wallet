@@ -56,7 +56,7 @@ const CHAIN_ID: Record<Network, CHAIN> = { mainnet: CHAIN.MAINNET, testnet: CHAI
 export const DEVICE_INFO: DeviceInfo = {
   platform: 'browser',
   appName: 'quickwallet',
-  appVersion: '1.2.0',
+  appVersion: '1.3.0',
   maxProtocolVersion: 2,
   features: ['SendTransaction', { name: 'SendTransaction', maxMessages: MAX_MESSAGES }],
 };
@@ -228,10 +228,15 @@ export type DappTransaction = {
 const JETTON_TRANSFER_OP = 0x0f8a7ea5;
 const NFT_TRANSFER_OP = 0x5fcc3d14;
 
-/** What a jetton or NFT transfer body moves, read the way the device reads it. */
-export type TokenTransfer =
+/**
+ * What a jetton or NFT transfer body moves, read the way the device reads it.
+ * `forward` is the TON the token contract passes on to the recipient out of
+ * the message's value, `response` where it sends the rest (null: nowhere).
+ */
+export type TokenTransfer = { forward: bigint; response: Address | null } & (
   | { kind: 'jetton'; amount: bigint; recipient: Address }
-  | { kind: 'nft'; recipient: Address };
+  | { kind: 'nft'; recipient: Address }
+);
 
 /**
  * Reads a TEP-74 jetton or TEP-62 NFT transfer body the way the device does
@@ -257,24 +262,31 @@ export function decodeTokenTransfer(body: Cell): TokenTransfer | null | undefine
     s.loadUintBig(64); // query_id
     const amount = op === JETTON_TRANSFER_OP ? s.loadCoins() : 0n;
     const recipient = stdAddress();
-    if (s.preloadUint(2) !== 0) stdAddress(); // response_destination
+    let response: Address | null = null;
+    if (s.preloadUint(2) !== 0) response = stdAddress(); // response_destination
     else s.skip(2);
     s.loadMaybeRef(); // custom_payload
-    s.loadCoins(); // forward amount
+    const forward = s.loadCoins();
     if (s.loadBit()) s.loadRef(); // forward_payload by ref
-    return op === JETTON_TRANSFER_OP ? { kind: 'jetton', amount, recipient } : { kind: 'nft', recipient };
+    return op === JETTON_TRANSFER_OP
+      ? { kind: 'jetton', amount, recipient, forward, response }
+      : { kind: 'nft', recipient, forward, response };
   } catch {
     return null;
   }
 }
 
 /**
- * False for a body that has a jetton or NFT transfer's op but doesn't parse
- * as one (see decodeTokenTransfer). Checked here too so the site hears no
- * before the user is asked anything.
+ * GRAM attached to a token or NFT transfer reads as gas only up to these, as
+ * on the device (TX_GAS_PLAIN_NANO / TX_FORWARD_PLAIN_NANO in
+ * firmware/main/gatt_svc.c): no more than gas would be, and no more than
+ * notification money going on to the recipient.
  */
-export function isReadableTokenTransfer(body: Cell): boolean {
-  return decodeTokenTransfer(body) !== null;
+export const GAS_PLAIN_NANO = 500_000_000n;
+export const FORWARD_PLAIN_NANO = 100_000_000n;
+
+export function isPlainGas(transfer: TokenTransfer, value: bigint): boolean {
+  return value <= GAS_PLAIN_NANO && transfer.forward <= FORWARD_PLAIN_NANO;
 }
 
 export function parseSendTransaction(
@@ -354,7 +366,15 @@ export function parseSendTransaction(
       } catch {
         throw bad(`${where}: the payload is not a valid cell.`);
       }
-      if (!isReadableTokenTransfer(body)) throw bad(`${where}: a malformed token transfer.`);
+      // The device refuses these too (firmware/main/ton_tx.c): an exotic
+      // cell can't be read on screen, and a token transfer's leftover TON
+      // goes back to this wallet or nowhere.
+      if (body.isExotic) throw bad(`${where}: the payload is an exotic cell, which the device cannot show.`);
+      const transfer = decodeTokenTransfer(body);
+      if (transfer === null) throw bad(`${where}: a malformed token transfer.`);
+      if (transfer?.response && !transfer.response.equals(own.address)) {
+        throw bad(`${where}: the transfer sends its leftover GRAM to another address.`);
+      }
     }
     let init: OutMessage['init'];
     if (m.stateInit !== undefined) {

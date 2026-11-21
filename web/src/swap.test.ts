@@ -189,35 +189,42 @@ describe('checkSwapTransaction', () => {
   it('accepts a jetton swap from your own jetton wallet, and names the swap contract', () => {
     const { recipient } = checkSwapTransaction(
       { messages: [jettonMessage(60n), jettonMessage(40n)] },
-      { from: jetton, amountUnits: 100n, ownJettonWallet },
+      { from: jetton, amountUnits: 100n, ownJettonWallet, ownWallet: me },
     );
     expect(recipient.equals(pool)).toBe(true);
   });
 
   it('refuses a jetton swap message addressed anywhere but your jetton wallet', () => {
     const messages = [jettonMessage(100n, { to: pool })];
-    expect(() => checkSwapTransaction({ messages }, { from: jetton, amountUnits: 100n, ownJettonWallet })).toThrow(
+    expect(() => checkSwapTransaction({ messages }, { from: jetton, amountUnits: 100n, ownJettonWallet, ownWallet: me })).toThrow(
       /other than your own jetton wallet/,
     );
   });
 
   it('refuses a jetton amount other than the one requested', () => {
     const messages = [jettonMessage(101n)];
-    expect(() => checkSwapTransaction({ messages }, { from: jetton, amountUnits: 100n, ownJettonWallet })).toThrow(
+    expect(() => checkSwapTransaction({ messages }, { from: jetton, amountUnits: 100n, ownJettonWallet, ownWallet: me })).toThrow(
       /101 token units, but 100/,
     );
   });
 
   it('refuses a message to your jetton wallet that is not a transfer', () => {
     const messages = [jettonMessage(100n, { body: Cell.EMPTY })];
-    expect(() => checkSwapTransaction({ messages }, { from: jetton, amountUnits: 100n, ownJettonWallet })).toThrow(
+    expect(() => checkSwapTransaction({ messages }, { from: jetton, amountUnits: 100n, ownJettonWallet, ownWallet: me })).toThrow(
       /not a token transfer/,
+    );
+  });
+
+  it('refuses a jetton swap whose leftover GRAM goes to another address', () => {
+    const messages = [jettonMessage(100n, { body: jettonTransferBody({ amount: 100n, to: pool, responseTo: pool }) })];
+    expect(() => checkSwapTransaction({ messages }, { from: jetton, amountUnits: 100n, ownJettonWallet, ownWallet: me })).toThrow(
+      /leftover GRAM to another address/,
     );
   });
 
   it('refuses a jetton swap attaching more TON than gas', () => {
     const messages = [jettonMessage(100n, { value: SWAP_MAX_GAS_PER_MESSAGE + 1n })];
-    expect(() => checkSwapTransaction({ messages }, { from: jetton, amountUnits: 100n, ownJettonWallet })).toThrow(
+    expect(() => checkSwapTransaction({ messages }, { from: jetton, amountUnits: 100n, ownJettonWallet, ownWallet: me })).toThrow(
       /gas/,
     );
   });
@@ -227,11 +234,11 @@ describe('checkSwapTransaction', () => {
     const deployed = contractAddress(0, init);
     const ok = [jettonMessage(100n, { to: deployed, init })];
     expect(() =>
-      checkSwapTransaction({ messages: ok }, { from: jetton, amountUnits: 100n, ownJettonWallet: deployed }),
+      checkSwapTransaction({ messages: ok }, { from: jetton, amountUnits: 100n, ownJettonWallet: deployed, ownWallet: me }),
     ).not.toThrow();
 
     const foreign = [jettonMessage(100n, { init })];
-    expect(() => checkSwapTransaction({ messages: foreign }, { from: jetton, amountUnits: 100n, ownJettonWallet })).toThrow(
+    expect(() => checkSwapTransaction({ messages: foreign }, { from: jetton, amountUnits: 100n, ownJettonWallet, ownWallet: me })).toThrow(
       /not your jetton wallet/,
     );
   });

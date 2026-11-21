@@ -160,24 +160,37 @@ can scan straight off the board; another press closes it.
    - **NFT item** — the full address of the item being handed over, on a page
      of its own. Nothing else on the screen says which item is leaving, so
      compare this whole address, the same way as a recipient's;
-   - **Send token** — the token amount, the recipient and the GRAM spent on
-     fees. The recipient and the number of token units come from what is
-     being signed. For USD₮ the board names the token and places the
+   - **Send token** — the token amount, the recipient and the GRAM that goes
+     with the transfer. The recipient and the number of token units come
+     from what is being signed. For USD₮ the board names the token and places the
      decimal point itself — **USDT**, without a `?` — and refuses a request
      where the app says otherwise. For any other token the `?` next to its
      name covers both the name and **where the decimal point goes**: that
      figure is the app's word, so a token you do not recognise deserves a
      small test transfer first;
-   - **Send NFT** — the new owner; the item itself was on the page before;
+   - the GRAM going with a token or NFT transfer reads `+0.05 GRAM gas` as
+     long as it is no more than gas. Anything more gets a **GRAM attached**
+     page first: the whole amount in large figures, how much of it goes on
+     to the recipient, and whether the rest comes back to you. Orange means
+     more than 0.5 GRAM — real money leaving, whatever the site calls it.
+     A swap from a token shows this page too, with about 0.26 GRAM. A
+     transfer that would send the rest to anyone but you is refused;
+   - **Send NFT** — the new owner; the item itself was shown before;
    - `+deploy` — a contract is created along with the transfer. A normal
      transfer should not have this;
    - `!Call` — a contract call the board cannot decode. A swap from GRAM
-     looks like this. In any other case, do not sign;
+     looks like this. In any other case, do not sign — least of all one
+     **to your USDT wallet**, which is how the board labels a call to it;
    - `TESTNET` on the bottom line — the test network, not real money.
 3. A press turns the pages. On the last page a press does nothing: to sign,
    **hold the button for a second** (**Hold 1s = sign**), so quick presses
    in a row can never run through the pages into a signature. Each page has 30 seconds, after which the request is
    refused.
+4. While a request waits for the button, its page is the only thing the
+   board shows. If anything else appears instead — **Busy**, **refused**,
+   **Ready** — do not hold the button, whatever the site says: a press only
+   brings the request's page back and does nothing else. Read it again, or
+   let it time out.
 
 **Transaction / Not understood, refused** — the board refused to sign what
 it was sent. That is protection, not a fault.
@@ -188,7 +201,8 @@ or wait for it to be cancelled.
 ## Swaps
 
 Swaps work only on mainnet. The board shows a swap from GRAM as `!Call` to a
-pool address, and a swap from a token as **Send token** with a `?`. The app
+pool address, and a swap from a token as **Send token** (with a `?` for any
+token but USD₮) after a **GRAM attached** page for the swap's gas. The app
 checks that a swap cannot take more than the amount you entered, but where
 the swapped amount actually goes cannot be verified. Only swap amounts you
 can afford to lose.

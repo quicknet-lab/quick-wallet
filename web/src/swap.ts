@@ -129,7 +129,7 @@ export function checkQuoteMatchesRequest(
   }
 }
 
-function jettonTransferOf(body: OutMessage['body']): { amount: bigint; destination: Address } {
+function jettonTransferOf(body: OutMessage['body']): { amount: bigint; destination: Address; response: Address | null } {
   if (!(body instanceof Cell)) {
     throw new Error('A swap message to your jetton wallet carries no token transfer. Refusing to sign.');
   }
@@ -139,7 +139,8 @@ function jettonTransferOf(body: OutMessage['body']): { amount: bigint; destinati
     slice.loadUintBig(64); // query_id
     const amount = slice.loadCoins();
     const destination = slice.loadAddress();
-    return { amount, destination };
+    const response = slice.loadMaybeAddress();
+    return { amount, destination, response };
   } catch {
     throw new Error('A swap message to your jetton wallet is not a token transfer. Refusing to sign.');
   }
@@ -163,7 +164,7 @@ function jettonTransferOf(body: OutMessage['body']): { amount: bigint; destinati
  */
 export function checkSwapTransaction(
   tx: { messages: OutMessage[] },
-  request: { from: SwapAsset; amountUnits: bigint; ownJettonWallet?: Address },
+  request: { from: SwapAsset; amountUnits: bigint; ownJettonWallet?: Address; ownWallet?: Address },
 ): { recipient: Address } {
   const { messages } = tx;
   if (messages.length === 0 || messages.length > SWAP_MAX_MESSAGES) {
@@ -197,6 +198,8 @@ export function checkSwapTransaction(
 
   const own = request.ownJettonWallet;
   if (!own) throw new Error('Your jetton wallet for this token could not be resolved.');
+  const ownWallet = request.ownWallet;
+  if (!ownWallet) throw new Error('This wallet\'s address is missing from the swap check.');
   if (totalTon > gasCap) {
     throw new Error(`The swap would attach ${fromNano(totalTon)} GRAM of gas — far more than a swap needs. Refusing to sign.`);
   }
@@ -212,6 +215,12 @@ export function checkSwapTransaction(
       throw new Error('The swap carries a contract deployment that is not your jetton wallet. Refusing to sign.');
     }
     const transfer = jettonTransferOf(message.body);
+    // The leftover GRAM of the transfer comes back here (Omniston builds it
+    // that way) or nowhere; the device refuses anything else, so say why
+    // before it gets there.
+    if (transfer.response && !transfer.response.equals(ownWallet)) {
+      throw new Error('The swap sends its leftover GRAM to another address. Refusing to sign.');
+    }
     sent += transfer.amount;
     recipient ??= transfer.destination;
   }

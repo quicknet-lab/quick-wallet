@@ -534,7 +534,7 @@ void display_show_splash(void)
     display_unlock();
 }
 
-void display_show_status(uint16_t color, const char *title, const char *line1, const char *line2)
+uint32_t display_show_status(uint16_t color, const char *title, const char *line1, const char *line2)
 {
     display_lock();
     display_clear();
@@ -560,5 +560,7 @@ void display_show_status(uint16_t color, const char *title, const char *line1, c
     draw_version();
 
     display_flush();
+    const uint32_t frame = display_frame_seq();
     display_unlock();
+    return frame;
 }

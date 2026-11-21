@@ -121,10 +121,20 @@ static struct {
 } s_proof;
 
 /* One page for the request as a whole, then one per message, plus — for a
- * jetton or NFT transfer — one naming the contract it is addressed to, plus
- * one for a comment that doesn't fit the spare row of its message's page. A press on any page but the last moves on;
- * only a press on the last one signs, so nothing can be signed unseen. */
-#define TX_MAX_PAGES (3 * TON_TX_MAX_MESSAGES + 1)
+ * jetton or NFT transfer — one naming the contract it is addressed to and,
+ * when it carries more than gas, one for the GRAM going with it, plus one
+ * for a comment that doesn't fit the spare row of its message's page. A
+ * press on any page but the last moves on; only a press on the last one
+ * signs, so nothing can be signed unseen. */
+#define TX_MAX_PAGES (4 * TON_TX_MAX_MESSAGES + 1)
+/* GRAM attached to a token or NFT transfer reads as gas only up to here:
+ * the app attaches 0.05, a swap from a token up to ~0.3 (the same bound as
+ * SWAP_MAX_GAS_PER_MESSAGE in web/src/swap.ts) — and only while no more than
+ * TX_FORWARD_PLAIN_NANO of it, the usual notification money, goes on to the
+ * recipient. Past either, it is money leaving the wallet, whatever the site
+ * calls it, and gets a page of its own (TX_PAGE_GRAM). */
+#define TX_GAS_PLAIN_NANO 500000000ull
+#define TX_FORWARD_PLAIN_NANO 100000000ull
 /* Left edge of the labels and extra lines on a message page, lined up
  * with the address under them. */
 #define TX_MARGIN_X 16
@@ -145,8 +155,24 @@ enum tx_page_kind {
      * on the main page is the host's word (see the '?') and so is where the
      * decimal point goes, and nothing on screen names the NFT. */
     TX_PAGE_SOURCE,
+    /* The GRAM a token or NFT transfer takes along, when it is more than
+     * gas (needs_gram_page()): the whole of it in large figures, how much of
+     * it goes on to the recipient, and whether the rest comes back. Before
+     * the main page, like TX_PAGE_SOURCE. */
+    TX_PAGE_GRAM,
     TX_PAGE_COMMENT,
 };
+
+static bool is_token_transfer(const ton_tx_msg_t *m)
+{
+    return m->kind == TON_TX_MSG_JETTON || m->kind == TON_TX_MSG_NFT;
+}
+
+static bool needs_gram_page(const ton_tx_msg_t *m)
+{
+    return is_token_transfer(m)
+        && (ton_tx_amount_above(m->ton, TX_GAS_PLAIN_NANO) || ton_tx_amount_above(m->forward_ton, TX_FORWARD_PLAIN_NANO));
+}
 static struct {
     uint8_t msg;
     uint8_t kind;
@@ -166,9 +192,13 @@ static void layout_tx_pages(void)
     s_tx_pages[s_tx_page_count++].kind = TX_PAGE_REQUEST;
     for (size_t i = 0; i < s_tx.n_msgs; i++) {
         const ton_tx_msg_t *m = &s_tx.msgs[i];
-        if (m->kind == TON_TX_MSG_JETTON || m->kind == TON_TX_MSG_NFT) {
+        if (is_token_transfer(m)) {
             s_tx_pages[s_tx_page_count].msg = (uint8_t)i;
             s_tx_pages[s_tx_page_count++].kind = TX_PAGE_SOURCE;
+        }
+        if (needs_gram_page(m)) {
+            s_tx_pages[s_tx_page_count].msg = (uint8_t)i;
+            s_tx_pages[s_tx_page_count++].kind = TX_PAGE_GRAM;
         }
         s_tx_pages[s_tx_page_count].msg = (uint8_t)i;
         s_tx_pages[s_tx_page_count++].kind = TX_PAGE_MAIN;
@@ -247,6 +277,31 @@ enum pending_op {
 };
 static enum pending_op s_pending;
 static int64_t s_pending_since_us;
+
+/* Whatever waits for the button (s_pending) or is being paged through (the
+ * seed phrase) owns the screen: draw_pending_locked() puts it up, and this
+ * is the display_frame_seq() of the frame it last drew. A press acts only
+ * while that frame is still the one on screen. Anything drawn over it — a
+ * status a host provoked on purpose ("Busy", "refused", "Ready"), a notice
+ * of main.c's, a pairing code — turns the next press into a redraw of the
+ * operation instead, so a press never confirms something the screen isn't
+ * showing. s_prompt_drawn is false until the first draw of each operation. */
+static uint32_t s_prompt_frame;
+static bool s_prompt_drawn;
+
+/* Caller holds s_lock and the display lock, right after display_flush() of
+ * a frame of the operation's own. */
+static void prompt_drawn_locked(void)
+{
+    s_prompt_frame = display_frame_seq();
+    s_prompt_drawn = true;
+}
+
+/* Caller holds s_lock. Whether the screen still shows what a press would act on. */
+static bool prompt_on_screen_locked(void)
+{
+    return s_prompt_drawn && display_frame_seq() == s_prompt_frame;
+}
 /* Set from the confirming press until the new key is in NVS (see
  * create_wallet_task). Nothing else may be armed meanwhile — above all not
  * a second create_wallet, whose key would race this one into NVS. */
@@ -296,6 +351,7 @@ static void clear_pending(void)
     memset(&s_own_address, 0, sizeof(s_own_address));
     s_tx_page = 0;
     s_tx_page_count = 0;
+    s_prompt_drawn = false;
 }
 
 /* Caller holds s_lock. Returns false if something else already holds the
@@ -310,6 +366,7 @@ static bool arm_pending_locked(enum pending_op op)
     }
     s_pending = op;
     s_pending_since_us = esp_timer_get_time();
+    s_prompt_drawn = false;
     return true;
 }
 
@@ -518,17 +575,28 @@ static int tx_request_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         return 0;
     }
 
+    /* A token transfer's leftover GRAM comes back to this wallet or nowhere:
+     * sent anywhere else, part of a value the screen calls gas would end up
+     * with a stranger. */
+    uint8_t owner[32];
+    ton_proof_wallet_address(wallet_key_get_pubkey(), s_req_tx.testnet, owner);
+    if (ton_tx_check_owner(&s_req_tx, owner) != TON_TX_OK) {
+        ESP_LOGW(TAG, "refusing to sign: a token transfer sends its leftover GRAM to someone else");
+        gatt_svc_set_status(WALLET_STATUS_TX_INVALID);
+        return 0;
+    }
+
     /* Tokens the device knows by itself are named and scaled by it; a host
      * label that says otherwise for one of them is not a display slip but a
-     * wrong amount on screen, so the request is refused. */
+     * wrong amount on screen, so the request is refused. Any message to such
+     * a jetton wallet but an NFT transfer is marked with it — a contract
+     * call to it is named on screen as one to this wallet's own USDT. */
     memset(s_req_jettons, 0, sizeof(s_req_jettons));
     if (!s_req_tx.testnet) {
-        uint8_t owner[32];
-        ton_proof_wallet_address(wallet_key_get_pubkey(), false, owner);
         for (size_t i = 0; i < s_req_tx.n_msgs; i++) {
             const ton_tx_msg_t *m = &s_req_tx.msgs[i];
-            const ton_jetton_t *known = m->kind == TON_TX_MSG_JETTON ? ton_jetton_identify(owner, &m->dest) : NULL;
-            if (known != NULL && s_req_hint.has_token
+            const ton_jetton_t *known = m->kind != TON_TX_MSG_NFT ? ton_jetton_identify(owner, &m->dest) : NULL;
+            if (known != NULL && m->kind == TON_TX_MSG_JETTON && s_req_hint.has_token
                 && (s_req_hint.decimals != known->decimals || strcmp(s_req_hint.symbol, known->symbol) != 0)) {
                 ESP_LOGW(TAG, "refusing to sign: the host labels %s as %s with %u decimals", known->symbol,
                          s_req_hint.symbol, (unsigned)s_req_hint.decimals);
@@ -970,6 +1038,7 @@ static void draw_seed_page(int page)
         }
     }
     display_flush();
+    prompt_drawn_locked();
     display_unlock();
 }
 
@@ -994,6 +1063,7 @@ static void draw_seed_check(void)
     }
     display_footer("Press: next   Hold 1s: choose", false, false);
     display_flush();
+    prompt_drawn_locked();
     display_unlock();
 }
 
@@ -1271,6 +1341,24 @@ static void draw_tx_page(void)
          * contracts (EQ…) for the ends to compare — not in the form the
          * recipient was typed in, which is what the hint's flag is about. */
         draw_address(64, &m->dest, true, testnet_hint);
+    } else if (s_tx_pages[s_tx_page].kind == TX_PAGE_GRAM) {
+        /* Not called gas here: the token contract passes forward_ton on to
+         * the recipient, and only what is left after that comes back (the
+         * leftover going to anyone else is refused, ton_tx_check_owner()). */
+        /* Orange past what gas could be; a swap from a token (~0.26 GRAM,
+         * 0.21 of it forwarded to the pool) gets this page in the usual
+         * color. */
+        const bool big = ton_tx_amount_above(m->ton, TX_GAS_PLAIN_NANO);
+        snprintf(line, sizeof(line), "GRAM attached%s", counter);
+        display_header(line, big ? COLOR_ORANGE : COLOR_ACCENT);
+        display_text_centered(28, FONT_S, COLOR_GRAY, "leaves the wallet with it:");
+        draw_amount(48, m->ton, 9, "GRAM", COLOR_GRAY);
+        ton_tx_format_amount(m->forward_ton, 9, 16, amount, sizeof(amount));
+        char forward[sizeof(amount) + sizeof(" GRAM to the recipient")];
+        snprintf(forward, sizeof(forward), "%s GRAM to the recipient", amount);
+        display_text_centered(92, FONT_S, COLOR_WHITE, forward);
+        display_text_centered(114, FONT_S, COLOR_GRAY,
+                              m->has_response ? "the rest comes back to you" : "the rest does not come back");
     } else if (s_tx_pages[s_tx_page].kind == TX_PAGE_COMMENT) {
         snprintf(line, sizeof(line), "Comment%s", counter);
         display_header(line, COLOR_ACCENT);
@@ -1300,11 +1388,17 @@ static void draw_tx_page(void)
              * this one; abbreviating it here again would only invite
              * comparing the two ends of an address, which is exactly what a
              * generated look-alike gets past. */
-            display_text_centered(30, FONT_M, COLOR_GRAY, "item: prev page");
+            display_text_centered(30, FONT_M, COLOR_GRAY, "item: shown before");
             to = "new owner:";
             break;
         default:
             draw_amount(26, m->ton, 9, "GRAM", COLOR_GRAY);
+            /* A call or a transfer to this wallet's own USDT jetton wallet
+             * (a burn, say): the device knows that address, so it says so. */
+            if (s_tx_jettons[msg_index] != NULL) {
+                snprintf(line, sizeof(line), "to your %s wallet:", s_tx_jettons[msg_index]->symbol);
+                to = line;
+            }
             break;
         }
         display_text(TX_MARGIN_X, 60, FONT_S, COLOR_GRAY, to);
@@ -1323,12 +1417,19 @@ static void draw_tx_page(void)
             break;
         case TON_TX_MSG_JETTON:
         case TON_TX_MSG_NFT:
-            /* The TON riding along for gas — leftovers come back, but this
-             * is what leaves the wallet. */
-            ton_tx_format_amount(m->ton, 9, (size_t)DISPLAY_COLS(FONT_S) - 11, amount, sizeof(amount));
+            /* The GRAM going along, which is what leaves the wallet besides
+             * the token. Called gas only while it is (needs_gram_page());
+             * otherwise it had a page of its own just before. */
+            ton_tx_format_amount(m->ton, 9, 14, amount, sizeof(amount));
             x = display_text(TX_MARGIN_X, 128, FONT_S, COLOR_GRAY, "+");
-            x = display_text(x, 128, FONT_S, COLOR_WHITE, amount);
-            display_text(x, 128, FONT_S, COLOR_GRAY, " GRAM gas");
+            if (needs_gram_page(m)) {
+                const uint16_t color = ton_tx_amount_above(m->ton, TX_GAS_PLAIN_NANO) ? COLOR_ORANGE : COLOR_WHITE;
+                x = display_text(x, 128, FONT_S, color, amount);
+                display_text(x, 128, FONT_S, color, " GRAM, shown before");
+            } else {
+                x = display_text(x, 128, FONT_S, COLOR_WHITE, amount);
+                display_text(x, 128, FONT_S, COLOR_GRAY, " GRAM gas");
+            }
             break;
         case TON_TX_MSG_CALL:
             if (m->has_op) {
@@ -1342,6 +1443,7 @@ static void draw_tx_page(void)
     }
     display_footer(last ? "Hold 1s = sign" : "Press = next", last, s_tx.testnet);
     display_flush();
+    prompt_drawn_locked();
     display_unlock();
 }
 
@@ -1379,6 +1481,7 @@ static void draw_proof_page(void)
     }
     display_footer("Hold 1s = sign", true, s_proof.testnet);
     display_flush();
+    prompt_drawn_locked();
     display_unlock();
 }
 
@@ -1438,7 +1541,80 @@ static void draw_own_address_page(void)
         display_footer("Press = QR code", false, s_own_address.testnet);
     }
     display_flush();
+    prompt_drawn_locked();
     display_unlock();
+}
+
+/* The status an armed operation puts its screen up with. */
+static enum wallet_status prompt_status(enum pending_op op)
+{
+    switch (op) {
+    case PENDING_SIGN:            return WALLET_STATUS_AWAITING_CONFIRM;
+    case PENDING_CREATE_WALLET:   return WALLET_STATUS_CREATE_AWAITING_CONFIRM;
+    case PENDING_SHOW_SEED:
+    case PENDING_SHOW_SEED_CHECK: return WALLET_STATUS_SEED_AWAITING_CONFIRM;
+    case PENDING_PIN_SET:         return WALLET_STATUS_PIN_SET_AWAITING_CONFIRM;
+    case PENDING_PIN_CHANGE:      return WALLET_STATUS_PIN_CHANGE_AWAITING_CONFIRM;
+    case PENDING_WIPE:            return WALLET_STATUS_WIPE_AWAITING_CONFIRM;
+    case PENDING_PROOF:           return WALLET_STATUS_PROOF_AWAITING_CONFIRM;
+    case PENDING_SHOW_ADDRESS:    return WALLET_STATUS_ADDRESS_SHOWING;
+    case PENDING_NONE:            break;
+    }
+    return WALLET_STATUS_IDLE;
+}
+
+/* Caller holds s_lock. Puts up the screen of whatever owns it — the seed
+ * phrase being paged through, or the operation waiting for the button —
+ * and records its frame (s_prompt_frame). Nothing if nothing owns it. */
+static void draw_pending_locked(void)
+{
+    if (seed_showing) {
+        if (seed_checking) {
+            draw_seed_check();
+        } else {
+            draw_seed_page(seed_page);
+        }
+        return;
+    }
+    const char *title;
+    uint16_t color = COLOR_ACCENT;
+    switch (s_pending) {
+    case PENDING_NONE:
+        return;
+    case PENDING_SIGN:
+        draw_tx_page();
+        return;
+    case PENDING_PROOF:
+        draw_proof_page();
+        return;
+    case PENDING_SHOW_ADDRESS:
+        draw_own_address_page();
+        return;
+    case PENDING_CREATE_WALLET:
+        title = "Create Wallet";
+        break;
+    case PENDING_SHOW_SEED:
+    case PENDING_SHOW_SEED_CHECK:
+        title = "Show Seed Phrase";
+        break;
+    case PENDING_PIN_SET:
+        title = "Set PIN";
+        break;
+    case PENDING_PIN_CHANGE:
+        title = "Change PIN";
+        break;
+    case PENDING_WIPE:
+        /* Named as bluntly as it fits on the screen: this is the one
+         * confirmation that destroys the key, so it must not read like the
+         * routine ones above. */
+        title = "ERASE WALLET?";
+        color = COLOR_RED;
+        break;
+    default:
+        return;
+    }
+    s_prompt_frame = display_show_status(color, title, "Press button", "to confirm");
+    s_prompt_drawn = true;
 }
 
 /* Deriving the key takes ~10-20s of solid CPU. On the button task
@@ -1463,6 +1639,22 @@ static void create_wallet_task(void *arg)
 void gatt_svc_on_confirm_button(bool long_press)
 {
     LOCK();
+
+    /* A press means what the screen shows. If anything has been drawn over
+     * the screen of what owns the button — whatever drew it — this press
+     * only puts that screen back: it turns no page, signs nothing and
+     * confirms nothing. An armed operation whose window has run out goes on
+     * to be dropped below as usual. */
+    if ((seed_showing || s_pending != PENDING_NONE) && !prompt_on_screen_locked()
+        && (seed_showing || !pending_expired())) {
+        if (seed_showing) {
+            seed_last_activity_us = esp_timer_get_time();
+        }
+        draw_pending_locked();
+        UNLOCK();
+        ESP_LOGW(TAG, "press while something else was on screen — the request is shown again, nothing done");
+        return;
+    }
 
     /* Actively paging through the seed phrase takes priority over anything
      * else a press could mean — once page 1 is up, every further press
@@ -1497,6 +1689,7 @@ void gatt_svc_on_confirm_button(bool long_press)
     if (op == PENDING_SHOW_ADDRESS && !pending_expired() && !s_own_address.qr_page) {
         s_own_address.qr_page = true;
         s_pending_since_us = esp_timer_get_time();
+        s_prompt_drawn = false; /* until the new page is up */
         UNLOCK();
         gatt_svc_set_status(WALLET_STATUS_ADDRESS_SHOWING);
         return;
@@ -1505,6 +1698,7 @@ void gatt_svc_on_confirm_button(bool long_press)
     if (op == PENDING_SIGN && !pending_expired() && s_tx_page + 1 < s_tx_page_count) {
         s_tx_page++;
         s_pending_since_us = esp_timer_get_time();
+        s_prompt_drawn = false; /* until the new page is up */
         UNLOCK();
         gatt_svc_set_status(WALLET_STATUS_AWAITING_CONFIRM);
         return;
@@ -1538,14 +1732,16 @@ void gatt_svc_on_confirm_button(bool long_press)
     bool seed_up = (op == PENDING_SHOW_SEED || op == PENDING_SHOW_SEED_CHECK) && !expired
                    && wallet_key_get_mnemonic(seed_words);
     s_creating = op == PENDING_CREATE_WALLET && !expired;
+    clear_pending();
     if (seed_up) {
+        /* After clear_pending(), which forgets the prompt's frame: the
+         * phrase's first page is the screen the next press acts on. */
         seed_page = 0;
         seed_showing = true;
         seed_check = op == PENDING_SHOW_SEED_CHECK;
         seed_last_activity_us = esp_timer_get_time();
         draw_seed_page(seed_page);
     }
-    clear_pending();
     UNLOCK();
 
     if (expired || (op != PENDING_PIN_CHANGE && op != PENDING_PIN_SET)) {
@@ -1713,15 +1909,19 @@ static void timeout_check_cb(void *arg)
         gatt_svc_set_status(seed_idle_check ? WALLET_STATUS_SEED_CHECK_FAILED : WALLET_STATUS_SEED_DONE);
     }
     if (s_display_revert_pending && esp_timer_get_time() >= s_display_revert_at_us) {
+        /* Only if that status is still what the screen shows, and nothing
+         * owns the screen. Transaction and sign-in pages, the seed phrase and
+         * its check, the pairing code and the OTA prompt are all drawn
+         * without coming through here; one put up within a few seconds of,
+         * say, "PIN Unlocked" used to be wiped by this revert (seen on the
+         * board 2026-09-29). */
+        LOCK();
         s_display_revert_pending = false;
-        /* Only if that status is still what the screen shows. Transaction
-         * and sign-in pages, the seed phrase and its check, the pairing code
-         * and the OTA prompt are all drawn without coming through here; one
-         * put up within a few seconds of, say, "PIN Unlocked" used to be
-         * wiped by this revert (seen on the board 2026-09-29). */
-        if (display_frame_seq() == s_display_revert_frame) {
+        if (s_pending == PENDING_NONE && !seed_showing && !ota_service_in_progress()
+            && display_frame_seq() == s_display_revert_frame) {
             draw_ready();
         }
+        UNLOCK();
     }
 }
 
@@ -1791,16 +1991,35 @@ static void draw_ready(void)
 }
 
 /* Mirrors a status onto the display (no-op on boards without one — see
- * display_flush()). For WALLET_STATUS_AWAITING_CONFIRM that is the current page
- * of the parsed signing request — see draw_tx_page(). */
+ * display_flush()).
+ *
+ * What waits for the button owns the screen (see s_prompt_frame): while
+ * something does, its own prompt status puts its screen up — for
+ * WALLET_STATUS_AWAITING_CONFIRM the current page of the parsed signing
+ * request — and any other status only goes out as a notification. Otherwise
+ * a host could put "Busy", "refused" or, after the revert, "Ready" over a
+ * transfer that holding the button would still sign. An OTA update owns the
+ * screen the same way; ota_service.c draws its own. Under s_lock
+ * throughout, so nothing gets armed between the check and the drawing. */
 static void show_status_on_display(enum wallet_status status)
 {
+    LOCK();
+    if (s_pending != PENDING_NONE || seed_showing) {
+        if (s_pending != PENDING_NONE && status == prompt_status(s_pending)) {
+            draw_pending_locked();
+            s_display_revert_pending = false;
+        }
+        UNLOCK();
+        return;
+    }
+    if (ota_service_in_progress()) {
+        UNLOCK();
+        return;
+    }
+
     switch (status) {
     case WALLET_STATUS_NO_WALLET:
         display_show_status(COLOR_ACCENT, "No Wallet", "Create via app", NULL);
-        break;
-    case WALLET_STATUS_CREATE_AWAITING_CONFIRM:
-        display_show_status(COLOR_ACCENT, "Create Wallet", "Press button", "to confirm");
         break;
     case WALLET_STATUS_CREATED:
         display_show_status(COLOR_GREEN, "Wallet", "Created", NULL);
@@ -1815,14 +2034,16 @@ static void show_status_on_display(enum wallet_status status)
         display_show_status(COLOR_ACCENT, "Quick Wallet", "Set a PIN", "via app");
         break;
     case WALLET_STATUS_AWAITING_CONFIRM:
-        LOCK();
-        if (s_pending == PENDING_SIGN && s_tx_page_count > 0) {
-            draw_tx_page();
-        } else {
-            /* Only if the window closed between arming and this repaint. */
-            display_show_status(COLOR_ACCENT, "Sign Transaction", "Press button", "to confirm");
-        }
-        UNLOCK();
+    case WALLET_STATUS_CREATE_AWAITING_CONFIRM:
+    case WALLET_STATUS_SEED_AWAITING_CONFIRM:
+    case WALLET_STATUS_PIN_SET_AWAITING_CONFIRM:
+    case WALLET_STATUS_PIN_CHANGE_AWAITING_CONFIRM:
+    case WALLET_STATUS_WIPE_AWAITING_CONFIRM:
+    case WALLET_STATUS_PROOF_AWAITING_CONFIRM:
+    case WALLET_STATUS_ADDRESS_SHOWING:
+        /* The prompt of an operation no longer armed — its window closed, or
+         * it was dropped, before this repaint: whatever reported that is on
+         * screen already. */
         break;
     case WALLET_STATUS_TX_INVALID:
         display_show_status(COLOR_RED, "Transaction", "Not understood,", "refused");
@@ -1851,9 +2072,6 @@ static void show_status_on_display(enum wallet_status status)
     case WALLET_STATUS_PIN_INVALID_LEN:
         display_show_status(COLOR_RED, "PIN", "Invalid length", NULL);
         break;
-    case WALLET_STATUS_SEED_AWAITING_CONFIRM:
-        display_show_status(COLOR_ACCENT, "Show Seed Phrase", "Press button", "to confirm");
-        break;
     case WALLET_STATUS_SEED_SHOWING:
         /* show_seed_on_display() paints the actual word pages right after this
          * status is set — nothing generic to draw here. */
@@ -1876,14 +2094,8 @@ static void show_status_on_display(enum wallet_status status)
     case WALLET_STATUS_SEED_UNAVAILABLE:
         display_show_status(COLOR_ORANGE, "Seed Phrase", "Not available", "for this wallet");
         break;
-    case WALLET_STATUS_PIN_SET_AWAITING_CONFIRM:
-        display_show_status(COLOR_ACCENT, "Set PIN", "Press button", "to confirm");
-        break;
     case WALLET_STATUS_PIN_SET_REJECTED:
         display_show_status(COLOR_RED, "Set PIN", "Rejected", "or timed out");
-        break;
-    case WALLET_STATUS_PIN_CHANGE_AWAITING_CONFIRM:
-        display_show_status(COLOR_ACCENT, "Change PIN", "Press button", "to confirm");
         break;
     case WALLET_STATUS_PIN_CHANGED:
         display_show_status(COLOR_GREEN, "PIN", "Changed", NULL);
@@ -1891,24 +2103,11 @@ static void show_status_on_display(enum wallet_status status)
     case WALLET_STATUS_PIN_CHANGE_REJECTED:
         display_show_status(COLOR_RED, "Change PIN", "Rejected", "or timed out");
         break;
-    case WALLET_STATUS_WIPE_AWAITING_CONFIRM:
-        /* Named as bluntly as it fits on the screen: this is the one
-         * confirmation that destroys the key, so it must not read like the
-         * routine ones above. */
-        display_show_status(COLOR_RED, "ERASE WALLET?", "Press button", "to confirm");
-        break;
     case WALLET_STATUS_WIPED:
         display_show_status(COLOR_ORANGE, "Factory Reset", "Erased", NULL);
         break;
     case WALLET_STATUS_WIPE_REJECTED:
         display_show_status(COLOR_RED, "Erase Wallet", "Rejected", "or timed out");
-        break;
-    case WALLET_STATUS_PROOF_AWAITING_CONFIRM:
-        LOCK();
-        if (s_pending == PENDING_PROOF) {
-            draw_proof_page();
-        }
-        UNLOCK();
         break;
     case WALLET_STATUS_PROOF_SIGNED:
         display_show_status(COLOR_GREEN, "Sign In", "Signed", NULL);
@@ -1921,13 +2120,6 @@ static void show_status_on_display(enum wallet_status status)
         break;
     case WALLET_STATUS_BUSY:
         display_show_status(COLOR_ORANGE, "Busy", "Finish the other", "request first");
-        break;
-    case WALLET_STATUS_ADDRESS_SHOWING:
-        LOCK();
-        if (s_pending == PENDING_SHOW_ADDRESS) {
-            draw_own_address_page();
-        }
-        UNLOCK();
         break;
     case WALLET_STATUS_SEED_UNCHECKED:
     case WALLET_STATUS_IDLE:
@@ -1964,15 +2156,20 @@ static void show_status_on_display(enum wallet_status status)
         s_display_revert_frame = display_frame_seq();
         break;
     }
+    UNLOCK();
 }
 
 void gatt_svc_show_notice(uint16_t color, const char *title, const char *line1, const char *line2,
                           int64_t for_us)
 {
-    display_show_status(color, title, line1, line2);
-    s_display_revert_pending = true;
-    s_display_revert_at_us = esp_timer_get_time() + for_us;
-    s_display_revert_frame = display_frame_seq();
+    /* Not over a screen something waits on — see show_status_on_display(). */
+    LOCK();
+    if (s_pending == PENDING_NONE && !seed_showing && !ota_service_in_progress()) {
+        s_display_revert_frame = display_show_status(color, title, line1, line2);
+        s_display_revert_at_us = esp_timer_get_time() + for_us;
+        s_display_revert_pending = true;
+    }
+    UNLOCK();
 }
 
 void gatt_svc_set_status(enum wallet_status status)

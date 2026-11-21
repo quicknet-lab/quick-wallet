@@ -40,11 +40,13 @@ import { SessionCrypto, type AppRequest, type ConnectItemReply, type RpcMethod }
 import {
   DEVICE_INFO,
   ERROR,
+  GAS_PLAIN_NANO,
   TonConnectError,
   decodeTokenTransfer,
   errorResponse,
   fetchManifest,
   isNewRequest,
+  isPlainGas,
   listen,
   loadApps,
   markRequestAnswered,
@@ -3007,6 +3009,23 @@ async function handleAppRequest(app: ConnectedApp, request: AppRequest<RpcMethod
     const n = tx.messages.length > 1 ? ` ${i + 1}` : '';
     const transfer = m.body instanceof Cell ? decodeTokenTransfer(m.body) : undefined;
     const recipient = (a: Address) => a.toString({ bounceable: false, testOnly: own.network === 'testnet' });
+    // The GRAM riding along with a token or NFT transfer is gas only while
+    // it is no more than gas would be (isPlainGas, the same bounds as the
+    // device's): beyond that it is money leaving the wallet, and part of it
+    // goes on to the recipient.
+    const gram = (t: NonNullable<typeof transfer>) => {
+      if (isPlainGas(t, m.value)) {
+        fields.push([`gas${n}`, `${shortAmount(fromNano(m.value))} GRAM`]);
+        return;
+      }
+      fields.push([
+        `attached${n}`,
+        `${shortAmount(fromNano(m.value))} GRAM, ${shortAmount(fromNano(t.forward))} of it to the recipient`,
+      ]);
+      if (m.value > GAS_PLAIN_NANO) {
+        fields.push([`warning${n}`, 'far more GRAM than gas leaves with this transfer']);
+      }
+    };
     if (transfer?.kind === 'jetton') {
       // Addressed to one of this wallet's own jetton wallets; which token
       // that is comes from the holdings already loaded, not from the site.
@@ -3021,12 +3040,12 @@ async function handleAppRequest(app: ConnectedApp, request: AppRequest<RpcMethod
       if (held && transfer.amount >= held.balance) {
         fields.push([`warning${n}`, `this is your whole ${held.symbol} balance`]);
       }
-      fields.push([`gas${n}`, `${shortAmount(fromNano(m.value))} GRAM`]);
+      gram(transfer);
     } else if (transfer?.kind === 'nft') {
       const item = nfts.find((nft) => nft.address.equals(m.to));
       fields.push([`send${n}`, item ? `NFT "${item.name}"` : `NFT ${m.to.toString({ testOnly: m.testOnly })}`]);
       fields.push([`to${n}`, recipient(transfer.recipient)]);
-      fields.push([`gas${n}`, `${shortAmount(fromNano(m.value))} GRAM`]);
+      gram(transfer);
     } else {
       fields.push([`to${n}`, m.to.toString({ bounceable: m.bounce, testOnly: m.testOnly })]);
       fields.push([`amount${n}`, `${shortAmount(fromNano(m.value))} GRAM`]);

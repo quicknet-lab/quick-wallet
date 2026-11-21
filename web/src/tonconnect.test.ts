@@ -1,6 +1,6 @@
 import { Buffer } from 'buffer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Address, beginCell, storeStateInit, toNano } from '@ton/core';
+import { Address, BitString, Cell, beginCell, storeStateInit, toNano } from '@ton/core';
 import { createWalletContract } from './wallet';
 import {
   ERROR,
@@ -11,6 +11,7 @@ import {
   markRequestAnswered,
   parseConnectLink,
   decodeTokenTransfer,
+  isPlainGas,
   parseSendTransaction,
   tonProofHash,
   type ConnectedApp,
@@ -234,20 +235,41 @@ describe('parseSendTransaction', () => {
   });
 
   it('refuses a token transfer the device could not read, and passes well-formed ones', () => {
+    // response_destination: this wallet or none — anything else is refused below.
     const payload = (c: ReturnType<typeof beginCell>) => ({ address: dest.toRawString(), amount: '1', payload: c.endCell().toBoc().toString('base64') });
     const addrVar = () => beginCell().storeUint(3, 2).storeBit(0).storeUint(256, 9).storeInt(0, 32).storeBuffer(Buffer.alloc(32, 0xdd));
     const jetton = () => beginCell().storeUint(0x0f8a7ea5, 32).storeUint(0, 64).storeCoins(5n).storeAddress(dest);
     const nft = () => beginCell().storeUint(0x5fcc3d14, 32).storeUint(0, 64).storeAddress(dest);
     const tail = (b: ReturnType<typeof beginCell>) => b.storeBit(0).storeCoins(1n);
 
-    expect(parse({ messages: [payload(tail(jetton().storeAddress(dest)).storeBit(0))] }).messages).toHaveLength(1);
+    expect(parse({ messages: [payload(tail(jetton().storeAddress(own.address)).storeBit(0))] }).messages).toHaveLength(1);
     expect(parse({ messages: [payload(tail(jetton().storeAddress(null)).storeBit(1).storeRef(beginCell().endCell()))] }).messages).toHaveLength(1);
-    expect(parse({ messages: [payload(tail(nft().storeAddress(dest)).storeBit(0))] }).messages).toHaveLength(1);
+    expect(parse({ messages: [payload(tail(nft().storeAddress(own.address)).storeBit(0))] }).messages).toHaveLength(1);
 
     expect(codeOf(() => parse({ messages: [payload(tail(jetton().storeAddress(dest)).storeBit(1))] }))).toBe(ERROR.BAD_REQUEST);
     expect(codeOf(() => parse({ messages: [payload(tail(jetton().storeBuilder(addrVar())).storeBit(0))] }))).toBe(ERROR.BAD_REQUEST);
     expect(codeOf(() => parse({ messages: [payload(tail(nft().storeBuilder(addrVar())).storeBit(0))] }))).toBe(ERROR.BAD_REQUEST);
     expect(codeOf(() => parse({ messages: [payload(beginCell().storeUint(0x0f8a7ea5, 32))] }))).toBe(ERROR.BAD_REQUEST);
+  });
+
+  it('refuses a token transfer whose leftover GRAM goes to anyone but this wallet', () => {
+    const payload = (c: ReturnType<typeof beginCell>) => ({ address: dest.toRawString(), amount: '1', payload: c.endCell().toBoc().toString('base64') });
+    const jetton = (response: Address) =>
+      beginCell().storeUint(0x0f8a7ea5, 32).storeUint(0, 64).storeCoins(5n).storeAddress(dest).storeAddress(response)
+        .storeBit(0).storeCoins(1n).storeBit(0);
+    const nft = (response: Address) =>
+      beginCell().storeUint(0x5fcc3d14, 32).storeUint(0, 64).storeAddress(dest).storeAddress(response)
+        .storeBit(0).storeCoins(1n).storeBit(0);
+    expect(codeOf(() => parse({ messages: [payload(jetton(dest))] }))).toBe(ERROR.BAD_REQUEST);
+    expect(codeOf(() => parse({ messages: [payload(nft(dest))] }))).toBe(ERROR.BAD_REQUEST);
+    // This wallet's hash in the masterchain is another account altogether.
+    expect(codeOf(() => parse({ messages: [payload(jetton(new Address(-1, own.address.hash)))] }))).toBe(ERROR.BAD_REQUEST);
+  });
+
+  it('refuses a library cell as a payload', () => {
+    const library = new Cell({ exotic: true, bits: new BitString(Buffer.from('02' + '11'.repeat(32), 'hex'), 0, 264) });
+    const msg = { address: dest.toRawString(), amount: '1', payload: library.toBoc().toString('base64') };
+    expect(codeOf(() => parse({ messages: [msg] }))).toBe(ERROR.BAD_REQUEST);
   });
 
   it('accepts its own address and network when the site names them', () => {
@@ -271,6 +293,24 @@ describe('decodeTokenTransfer', () => {
     const t = decodeTokenTransfer(tail(beginCell().storeUint(0x5fcc3d14, 32).storeUint(0, 64).storeAddress(to)));
     expect(t?.kind).toBe('nft');
     expect(t && t.recipient.equals(to)).toBe(true);
+  });
+
+  it('reads where the attached TON goes', () => {
+    const body = beginCell().storeUint(0x0f8a7ea5, 32).storeUint(0, 64).storeCoins(1n).storeAddress(to)
+      .storeAddress(to).storeBit(0).storeCoins(toNano('299.9')).storeBit(0).endCell();
+    const t = decodeTokenTransfer(body);
+    expect(t?.forward).toBe(toNano('299.9'));
+    expect(t?.response?.equals(to)).toBe(true);
+    expect(decodeTokenTransfer(tail(beginCell().storeUint(0x5fcc3d14, 32).storeUint(0, 64).storeAddress(to)))?.response).toBeNull();
+  });
+
+  it('calls attached TON gas only while it is', () => {
+    const t = (forward: bigint) => ({ kind: 'nft' as const, recipient: to, forward, response: null });
+    expect(isPlainGas(t(1n), toNano('0.05'))).toBe(true);
+    expect(isPlainGas(t(1n), toNano('0.5'))).toBe(true);
+    expect(isPlainGas(t(1n), toNano('0.5') + 1n)).toBe(false);
+    expect(isPlainGas(t(toNano('0.1')), toNano('0.3'))).toBe(true);
+    expect(isPlainGas(t(toNano('0.21')), toNano('0.26'))).toBe(false); // a swap from a token
   });
 
   it('tells other bodies from broken transfers', () => {

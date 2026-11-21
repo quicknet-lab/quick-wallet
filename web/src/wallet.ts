@@ -580,6 +580,7 @@ export class TonWallet {
       from: params.from,
       amountUnits: params.amountUnits,
       ownJettonWallet,
+      ownWallet: this.address,
     });
     assertAffordable(params.totalValue, own.balance);
     return this.signTransfer(
